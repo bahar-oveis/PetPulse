@@ -2,6 +2,7 @@
 
 import streamlit as st
 
+import chat
 import database as db
 
 st.set_page_config(page_title="PetPulse", page_icon="🐾", layout="centered")
@@ -51,6 +52,8 @@ SHORT_FIELDS = {"name", "breed", "owner_contact", "vet_name", "vet_contact"}
 st.session_state.setdefault("editing_pet_id", None)
 st.session_state.setdefault("add_form_version", 0)
 st.session_state.setdefault("flash", None)
+# Sitter chats: {pet_id: [messages]}, so each pet has its own conversation.
+st.session_state.setdefault("chats", {})
 
 
 def pet_form_fields(key_prefix, pet=None):
@@ -174,6 +177,93 @@ def show_add_pet():
             st.rerun()
 
 
+def or_dash(value):
+    return value if value not in (None, "") else "—"
+
+
+def show_pet_summary(pet):
+    """Compact card with the most important facts; details are in expanders."""
+    with st.container(border=True):
+        st.markdown(f"### 🐾 {pet['name']}")
+        species_col, breed_col, age_col = st.columns(3)
+        species_col.markdown(f"**Species**  \n{pet['species']}")
+        breed_col.markdown(f"**Breed**  \n{or_dash(pet['breed'])}")
+        age_col.markdown(f"**Age**  \n{or_dash(pet['age'])}")
+
+        st.markdown(f"⚠️ **Allergies:** {or_dash(pet['allergies'])}")
+        st.markdown(f"🔊 **Sensitivities:** {or_dash(pet['sensitivities'])}")
+
+        routine = " · ".join(text for text in (pet["feeding_schedule"], pet["daily_routine"]) if text)
+        if len(routine) > 150:
+            routine = routine[:150].rstrip() + "…"
+        st.markdown(f"🕗 **Routine:** {or_dash(routine)}")
+
+    with st.expander("🚨 Emergency contacts & instructions"):
+        st.markdown(f"**Emergency instructions:** {or_dash(pet['emergency_instructions'])}")
+        st.markdown(f"**Owner contact:** {or_dash(pet['owner_contact'])}")
+        st.markdown(f"**Veterinarian:** {or_dash(pet['vet_name'])} ({or_dash(pet['vet_contact'])})")
+
+    with st.expander("🩺 Medical information"):
+        st.markdown(f"**Medical conditions:** {or_dash(pet['medical_conditions'])}")
+        st.markdown(f"**Medications:** {or_dash(pet['medications'])}")
+        st.markdown(f"**Medical history:** {or_dash(pet['medical_history'])}")
+
+
+def show_chat(pet):
+    """Chat with the assistant about the selected pet. Each pet has its own history."""
+    chats = st.session_state.chats
+
+    title_col, button_col = st.columns([3, 1])
+    title_col.markdown("#### 💬 Ask PetPulse")
+    if button_col.button("Clear Chat", key=f"clear_chat_{pet['id']}", width="stretch"):
+        chat.clear_history(chats, pet["id"])
+
+    history = chat.get_history(chats, pet)
+    # Fixed-height board: messages scroll inside it instead of making the page longer.
+    messages = st.container(height=420, border=True)
+    with messages:
+        for message in history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+    question = st.chat_input(f"Ask about {pet['name']}'s care…", key="sitter_chat_input")
+    if question:
+        reply = chat.send_message(chats, pet, question)
+        with messages:
+            with st.chat_message("user"):
+                st.markdown(question)
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+
+
+def show_sitter_dashboard():
+    pets = db.get_all_pets()
+    if not pets:
+        st.info("No pets are available yet. Ask the pet's owner to create a profile in the **Pet Owner** tab.")
+        return
+
+    st.badge("Demo Mode", icon="🧪", color="orange")
+    st.caption(
+        "Selecting a pet simulates being authorized by its owner. "
+        "Access control is not implemented yet."
+    )
+
+    # The selected pet ID is kept in session state by the app. The chat (and the
+    # future AI agent) only ever receives this ID; the AI cannot pick another pet.
+    pets_by_id = {p["id"]: p for p in pets}
+    selected_id = st.selectbox(
+        "Which pet are you caring for?",
+        list(pets_by_id),
+        format_func=lambda pet_id: f"{pets_by_id[pet_id]['name']} ({pets_by_id[pet_id]['species']})",
+        key="sitter_pet_id",
+    )
+    pet = pets_by_id[selected_id]
+
+    show_pet_summary(pet)
+    st.divider()
+    show_chat(pet)
+
+
 # Header
 st.title("🐾 PetPulse")
 st.caption("AI-powered pet care assistant")
@@ -206,4 +296,4 @@ with sitter_tab:
         "Get personalized guidance for the pets you care for, "
         "based on each pet's profile."
     )
-    st.info("💬 The AI chat assistant is coming soon.")
+    show_sitter_dashboard()

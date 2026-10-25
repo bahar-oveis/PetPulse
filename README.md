@@ -59,8 +59,10 @@ The tests use a temporary database, so your saved pets are not affected.
 | File | Purpose |
 | --- | --- |
 | `app.py` | Streamlit user interface |
+| `chat.py` | Sitter chat: per-pet conversations and replies |
 | `agent.py` | AI assistant (placeholder) |
 | `database.py` | SQLite database for pet profiles |
 | `test_database.py` | Tests for the database functions |
+| `test_chat.py` | Tests for the sitter chat |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Example environment settings |
