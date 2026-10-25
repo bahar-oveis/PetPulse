@@ -42,12 +42,25 @@ streamlit run app.py
 
 Then open http://localhost:8501 in your browser.
 
+On first start, the app creates `petpulse.db` and adds **Milo**, a fictional
+demo dog, so there is something to look at. Milo is added only when the
+database is empty. To start over, stop the app and delete `petpulse.db`.
+
+## Run the tests
+
+```bash
+python -m unittest -v
+```
+
+The tests use a temporary database, so your saved pets are not affected.
+
 ## Project files
 
 | File | Purpose |
 | --- | --- |
 | `app.py` | Streamlit user interface |
 | `agent.py` | AI assistant (placeholder) |
-| `database.py` | SQLite database (placeholder) |
+| `database.py` | SQLite database for pet profiles |
+| `test_database.py` | Tests for the database functions |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Example environment settings |
