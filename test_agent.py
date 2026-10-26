@@ -22,30 +22,45 @@ import database as db
 REAL_CREATE_CLIENT = agent._create_client
 
 
+def fake_response(text, stop_reason="end_turn"):
+    content = [SimpleNamespace(type="text", text=text)] if text is not None else []
+    return SimpleNamespace(
+        content=content, stop_reason=stop_reason, usage=SimpleNamespace(input_tokens=100, output_tokens=20)
+    )
+
+
 class FakeClient:
     """
-    Pretends to be anthropic.Anthropic().
+    Pretends to be anthropic.Anthropic() and its tool runner.
 
     It records every request, so tests can check exactly what Claude would see,
-    and returns a fixed reply (or raises a fixed error).
+    and returns a fixed reply (or raises a fixed error). If memory_searches is
+    set, it first calls the memory tool with those queries, like Claude would,
+    and records what the tool returned.
     """
 
-    def __init__(self, reply="Here is my answer.", error=None, stop_reason="end_turn"):
+    def __init__(self, reply="Here is my answer.", error=None, stop_reason="end_turn", memory_searches=()):
         self.reply = reply
         self.error = error
         self.stop_reason = stop_reason
+        self.memory_searches = list(memory_searches)
+        self.before_reply = None  # optional hook, called while "Claude is thinking"
         self.requests = []
-        self.messages = SimpleNamespace(create=self._create)
+        self.tool_results = []
+        self.beta = SimpleNamespace(messages=SimpleNamespace(tool_runner=self._tool_runner))
 
-    def _create(self, **request):
+    def _tool_runner(self, **request):
         self.requests.append(request)
         if self.error:
             raise self.error
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=self.reply)],
-            stop_reason=self.stop_reason,
-            usage=SimpleNamespace(input_tokens=100, output_tokens=20),
-        )
+        responses = []
+        for query in self.memory_searches:
+            responses.append(fake_response(None, "tool_use"))
+            self.tool_results.append(request["tools"][0].call({"query": query}))
+        if self.before_reply:
+            self.before_reply()
+        responses.append(fake_response(self.reply, self.stop_reason))
+        return iter(responses)
 
 
 def api_error(error_class, status):
@@ -145,13 +160,14 @@ class AskTests(AgentTestCase):
         answer = agent.ask(self.milo_id, "Can I give Milo chicken?", [])
         self.assertEqual(answer, "Here is my answer.")
 
-    def test_one_request_with_profile_and_no_tools(self):
+    def test_one_request_with_profile_and_memory_tool(self):
         agent.ask(self.milo_id, "Can I give Milo chicken?", [])
         self.assertEqual(len(self.client.requests), 1)
         request = self.client.requests[0]
-        self.assertNotIn("tools", request)
         self.assertIn("<pet_profile>", request["system"])
         self.assertIn("Chicken", request["system"])
+        self.assertEqual([tool.name for tool in request["tools"]], ["recall_pet_memories"])
+        self.assertEqual(request["max_iterations"], agent.MAX_ITERATIONS)
 
     def test_request_settings(self):
         agent.ask(self.milo_id, "Hi", [])

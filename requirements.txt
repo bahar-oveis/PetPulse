@@ -3,3 +3,5 @@ anthropic
 python-dotenv
 faster-whisper
 streamlit-webrtc
+sentence-transformers
+numpy

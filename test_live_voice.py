@@ -351,11 +351,7 @@ class LiveSessionTests(unittest.TestCase):
         self.assertEqual(len(self.client.requests), 1)
 
     def test_answer_is_discarded_if_session_ends_while_claude_answers(self):
-        def answer_after_stop(**request):
-            self.session.stop()
-            return FakeClient._create(self.client, **request)
-
-        self.client.messages.create = answer_after_stop
+        self.client.before_reply = self.session.stop
         self.say()
         history = chat.get_history(self.store, self.milo)
         self.assertEqual([m["role"] for m in history], ["assistant", "user"])  # question visible, no answer

@@ -74,6 +74,21 @@ CREATE TABLE IF NOT EXISTS pets (
 )
 """
 
+# Observations saved by sitters (Pet Memory). Each belongs to exactly one pet.
+# embedding holds the local sentence-transformers vector (float32 bytes), or NULL.
+CREATE_MEMORIES_TABLE = """
+CREATE TABLE IF NOT EXISTS pet_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pet_id INTEGER NOT NULL REFERENCES pets(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    source TEXT,
+    created_at TEXT NOT NULL,
+    embedding BLOB
+)
+"""
+
+CREATE_MEMORIES_INDEX = "CREATE INDEX IF NOT EXISTS idx_pet_memories_pet_id ON pet_memories (pet_id)"
+
 # Fictional demo pet, inserted only when the database is empty.
 DEMO_PET = {
     "name": "Milo",
@@ -102,6 +117,7 @@ def get_connection():
     """Open a connection that returns rows which behave like dictionaries."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -128,9 +144,11 @@ def _clean(data):
 
 
 def init_db():
-    """Create the database file and the pets table if they don't exist."""
+    """Create the database file and its tables if they don't exist. Safe to run every time."""
     with get_connection() as conn:
         conn.execute(CREATE_PETS_TABLE)
+        conn.execute(CREATE_MEMORIES_TABLE)
+        conn.execute(CREATE_MEMORIES_INDEX)
     conn.close()
 
 
@@ -195,3 +213,48 @@ def add_demo_pet_if_empty():
     conn.close()
     if count == 0:
         create_pet(DEMO_PET)
+
+
+# ----- Pet Memory (used by memory.py) -----
+# Every query filters by pet_id, so one pet's memories are never read or changed
+# through another pet.
+
+def add_memory(pet_id, content, source, embedding):
+    """Save one observation and return its ID. embedding is bytes or None."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "INSERT INTO pet_memories (pet_id, content, source, created_at, embedding) VALUES (?, ?, ?, ?, ?)",
+            (pet_id, content, source, _now(), embedding),
+        )
+        memory_id = cursor.lastrowid
+    conn.close()
+    return memory_id
+
+
+def get_memories(pet_id, with_embeddings=False):
+    """Return one pet's memories, oldest first, as dictionaries."""
+    columns = "id, pet_id, content, source, created_at" + (", embedding" if with_embeddings else "")
+    with get_connection() as conn:
+        rows = conn.execute(
+            f"SELECT {columns} FROM pet_memories WHERE pet_id = ? ORDER BY created_at, id", (pet_id,)
+        ).fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def set_memory_embedding(pet_id, memory_id, embedding):
+    """Store an embedding that was missing (e.g. the model wasn't available when it was saved)."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE pet_memories SET embedding = ? WHERE id = ? AND pet_id = ?", (embedding, memory_id, pet_id)
+        )
+    conn.close()
+
+
+def delete_memory(pet_id, memory_id):
+    """Delete a memory only if it belongs to this pet. Returns True if one was deleted."""
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM pet_memories WHERE id = ? AND pet_id = ?", (memory_id, pet_id))
+        deleted = cursor.rowcount > 0
+    conn.close()
+    return deleted

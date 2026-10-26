@@ -277,25 +277,29 @@ class VoiceAppTests(VoiceTestCase):
         self.at.audio_input[0].set_value(("question.wav", audio, "audio/wav")).run()
         self.assertFalse(self.at.exception)
 
+    def voice_boxes(self):
+        """The transcription box(es) for voice questions (not other text areas on the page)."""
+        return [box for box in self.at.text_area if (box.key or "").startswith("voice_text_")]
+
     def chat_texts(self):
         return [m.markdown[0].value for m in self.at.tabs[1].chat_message if m.markdown]
 
     def test_record_review_send_and_listen(self):
         self.record()
-        self.assertEqual(self.at.text_area[0].value, "Can Milo eat chicken?")
+        self.assertEqual(self.voice_boxes()[0].value, "Can Milo eat chicken?")
         self.at.run()
         self.at.run()
         self.assertEqual(len(self.whisper.calls), 1)  # reruns don't transcribe again
         self.assertEqual(self.client.requests, [])    # nothing sent before confirming
 
-        self.at.text_area[0].input("Can Milo eat chicken treats?")
+        self.voice_boxes()[0].input("Can Milo eat chicken treats?")
         self.at.button(key=f"voice_send_{self.milo['id']}").click().run()
         self.assertFalse(self.at.exception)
         self.assertEqual(len(self.client.requests), 1)
         self.assertIn("Can Milo eat chicken treats?", self.chat_texts())
         self.assertIn("No, Milo is allergic to chicken.", self.chat_texts())
         self.assertEqual(len(self.at.get("audio")), 1)  # spoken answer player
-        self.assertEqual(len(self.at.text_area), 0)     # recorder cleared
+        self.assertEqual(len(self.voice_boxes()), 0)     # recorder cleared
 
         self.at.run()
         self.at.run()
@@ -305,9 +309,9 @@ class VoiceAppTests(VoiceTestCase):
     def test_switching_pets_discards_recording(self):
         self.record()
         self.at.selectbox(key="sitter_pet_id").set_value(self.luna["id"]).run()
-        self.assertEqual(len(self.at.text_area), 0)
+        self.assertEqual(len(self.voice_boxes()), 0)
         self.at.selectbox(key="sitter_pet_id").set_value(self.milo["id"]).run()
-        self.assertEqual(len(self.at.text_area), 0)  # Milo's old recording is gone too
+        self.assertEqual(len(self.voice_boxes()), 0)  # Milo's old recording is gone too
         self.assertEqual(self.client.requests, [])
 
     def test_tts_failure_still_shows_text_answer(self):

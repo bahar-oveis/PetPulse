@@ -2,9 +2,12 @@
 
 import streamlit as st
 
+from datetime import datetime
+
 import chat
 import database as db
 import live_voice
+import memory
 
 st.set_page_config(page_title="PetPulse", page_icon="🐾", layout="centered")
 
@@ -169,6 +172,9 @@ def show_my_pets():
             st.session_state.editing_pet_id = pet["id"]
             st.rerun()
         show_profile(pet)
+        with st.expander("📝 Sitter observations (unverified)"):
+            st.caption("Notes saved by pet sitters. They are not added to the profile above.")
+            show_memory_timeline(pet, can_delete=False)
 
 
 def show_add_pet():
@@ -219,6 +225,51 @@ def show_pet_summary(pet):
         st.markdown(f"**Medical conditions:** {or_dash(pet['medical_conditions'])}")
         st.markdown(f"**Medications:** {or_dash(pet['medications'])}")
         st.markdown(f"**Medical history:** {or_dash(pet['medical_history'])}")
+
+
+def show_pet_memory(pet):
+    """Sitter's Pet Memory: observations that are remembered across visits."""
+    with st.expander("📝 Pet Memory"):
+        st.caption(
+            "Observations saved here are remembered across visits and restarts, and PetPulse can "
+            "look them up when answering. They are unverified sitter notes, not owner-approved facts. "
+            "Demo Mode: please use fictional records only."
+        )
+        with st.form(f"memory_form_{pet['id']}", clear_on_submit=True):
+            note = st.text_area(
+                "Add observation",
+                placeholder=f"e.g. {pet['name']} hid under the bed when the doorbell rang.",
+                max_chars=memory.MAX_LENGTH,
+            )
+            saved = st.form_submit_button("Save to Memory", type="primary")
+        # A form submit returns True only on the run right after the click, so reruns can't save twice.
+        if saved:
+            try:
+                with st.spinner("Saving…"):
+                    memory.save_pet_memory(pet["id"], note)
+                st.success("✅ Saved to memory.")
+            except memory.PetMemoryError as error:
+                st.warning(str(error))
+        show_memory_timeline(pet, can_delete=True)
+
+
+def show_memory_timeline(pet, can_delete):
+    """List a pet's observations, newest first."""
+    memories = list(reversed(memory.get_pet_memories(pet["id"])))
+    if not memories:
+        st.caption("No observations recorded yet.")
+        return
+    for item in memories:
+        when = datetime.fromisoformat(item["created_at"]).strftime("%d %b %Y, %H:%M")
+        text = f"**{when}** · {item['source']}  \n{item['content']}"
+        if not can_delete:
+            st.markdown(text)
+            continue
+        text_col, button_col = st.columns([5, 1])
+        text_col.markdown(text)
+        if button_col.button("Delete", key=f"delete_memory_{item['id']}"):
+            memory.delete_pet_memory(pet["id"], item["id"])
+            st.rerun()
 
 
 def show_chat(pet):
@@ -442,6 +493,7 @@ def show_sitter_dashboard():
     pet = pets_by_id[selected_id]
 
     show_pet_summary(pet)
+    show_pet_memory(pet)
     st.divider()
     show_chat(pet)
 

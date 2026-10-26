@@ -102,6 +102,23 @@ stop. Live, Voice Message, and Text Chat share the same conversation.
 - Use `http://localhost:8501`: browsers only allow the microphone on localhost
   or HTTPS. Running on a remote server would also need STUN/TURN servers.
 
+## Pet Memory
+
+In the Pet Sitter tab, open **📝 Pet Memory** to save observations from a
+visit (e.g. "Milo hid under the bed when the doorbell rang."). They are stored
+in the `pet_memories` table of `petpulse.db`, so they survive restarts and
+Clear Chat. When a sitter asks about past behavior, Claude searches them with
+its `recall_pet_memories` tool and presents them as unverified sitter
+observations, separate from the owner's profile. Owners can review them in the
+Pet Owner tab.
+
+- Embeddings are computed on this computer with
+  [sentence-transformers](https://www.sbert.net/) (`all-MiniLM-L6-v2`, about
+  90 MB, downloaded once) and compared with NumPy cosine similarity.
+- Searches only ever look at the selected pet's memories.
+- Nothing is saved automatically: only what a sitter saves with **Save to Memory**.
+- Demo Mode: use fictional records only.
+
 ## Project files
 
 | File | Purpose |
@@ -115,6 +132,8 @@ stop. Live, Voice Message, and Text Chat share the same conversation.
 | `voice.py` | Local speech to text (faster-whisper) and text to speech (macOS `say`) |
 | `test_agent.py` | Tests for the Claude agent (no real API calls) |
 | `live_voice.py` | Live Conversation: voice activity detection and the turn-taking session |
+| `memory.py` | Pet Memory: save, list, delete, and semantically search sitter observations |
+| `test_memory.py` | Tests for Pet Memory (fake embedding model, Claude mocked) |
 | `test_voice.py` | Tests for voice mode (Whisper, `say`, and Claude mocked) |
 | `test_live_voice.py` | Tests for Live Conversation (simulated microphone, Claude mocked) |
 | `requirements.txt` | Python dependencies |
