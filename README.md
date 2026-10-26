@@ -119,6 +119,31 @@ Pet Owner tab.
 - Nothing is saved automatically: only what a sitter saves with **Save to Memory**.
 - Demo Mode: use fictional records only.
 
+## Food & Allergy Scanner (PetPulse Vision)
+
+In the Pet Sitter tab, open **🔍 Food & Allergy Scanner**, upload or take a
+photo of a food label, and click **Analyze Food Label**.
+
+1. **On this computer:** the image is validated, its orientation fixed, and
+   it's resized (Pillow); sharpness is estimated and contrast enhanced
+   (OpenCV); the text is read with Tesseract OCR. You can correct the text.
+2. **Rule-based check:** the ingredients are compared with the pet's recorded
+   allergies and diet restrictions using a small, explicit list of ingredient
+   names (`food_checker.py`). Results: *Potential Conflict*, *No Match
+   Detected* (which never means "safe"), or *Unable to Verify*.
+3. **Claude:** click **Ask PetPulse about this label** to send the photo, the
+   confirmed text, and the rule-based result to the same Claude agent for a
+   personalized explanation. Follow-up questions are possible.
+
+Photos and results are kept only in the browser session, never saved.
+
+Tesseract is a system program, installed separately with Homebrew:
+
+```bash
+brew install tesseract
+tesseract --version   # check it works
+```
+
 ## Project files
 
 | File | Purpose |
@@ -133,6 +158,9 @@ Pet Owner tab.
 | `test_agent.py` | Tests for the Claude agent (no real API calls) |
 | `live_voice.py` | Live Conversation: voice activity detection and the turn-taking session |
 | `memory.py` | Pet Memory: save, list, delete, and semantically search sitter observations |
+| `vision.py` | Food label images: validation, orientation, resizing, blur check, contrast enhancement, OCR |
+| `food_checker.py` | Rule-based allergy matching for ingredient text |
+| `test_vision.py` | Tests for the scanner (OCR and Claude mocked) |
 | `test_memory.py` | Tests for Pet Memory (fake embedding model, Claude mocked) |
 | `test_voice.py` | Tests for voice mode (Whisper, `say`, and Claude mocked) |
 | `test_live_voice.py` | Tests for Live Conversation (simulated microphone, Claude mocked) |

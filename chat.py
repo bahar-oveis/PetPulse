@@ -56,6 +56,11 @@ def get_reply(pet_id, question, history):
     return agent.ask(pet_id, question, history)
 
 
+def get_label_reply(pet_id, image_bytes, media_type, label_text, check, question, history=()):
+    """Claude's answer about a scanned food label (same agent, with the photo and label data)."""
+    return agent.ask_about_label(pet_id, image_bytes, media_type, label_text, check, question, history)
+
+
 def send_message(store, pet, question):
     """
     Add the sitter's question and the assistant's reply to this pet's conversation.

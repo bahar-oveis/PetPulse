@@ -5,3 +5,6 @@ faster-whisper
 streamlit-webrtc
 sentence-transformers
 numpy
+pillow
+opencv-python-headless
+pytesseract

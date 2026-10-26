@@ -2,12 +2,15 @@
 
 import streamlit as st
 
+import hashlib
 from datetime import datetime
 
 import chat
 import database as db
+import food_checker
 import live_voice
 import memory
+import vision
 
 st.set_page_config(page_title="PetPulse", page_icon="🐾", layout="centered")
 
@@ -65,6 +68,10 @@ st.session_state.setdefault("voice_versions", {})
 st.session_state.setdefault("voice_notice", None)
 # Live Conversation: the running live_voice.LiveSession (one at a time), or None.
 st.session_state.setdefault("live_session", None)
+# Food & Allergy Scanner: the current scan (tagged with its pet ID), and an
+# uploader "version" per pet (bumped by "Scan another label" to clear the image).
+st.session_state.setdefault("scan", None)
+st.session_state.setdefault("scan_versions", {})
 
 TEXT_MODE = "💬 Text Chat"
 VOICE_MODE = "🎙️ Voice Message"
@@ -225,6 +232,169 @@ def show_pet_summary(pet):
         st.markdown(f"**Medical conditions:** {or_dash(pet['medical_conditions'])}")
         st.markdown(f"**Medications:** {or_dash(pet['medications'])}")
         st.markdown(f"**Medical history:** {or_dash(pet['medical_history'])}")
+
+
+STATUS_DISPLAY = {
+    food_checker.POTENTIAL_CONFLICT: (st.error, "⚠️ **Potential Conflict** — a recorded allergy or diet restriction appears in the ingredients."),
+    food_checker.NO_MATCH_DETECTED: (st.info, "ℹ️ **No Match Detected** — none of the recorded allergies were found. This does **not** mean the food is safe."),
+    food_checker.UNABLE_TO_VERIFY: (st.warning, "❓ **Unable to Verify** — the ingredients can't be checked reliably."),
+}
+
+
+def current_scan(pet):
+    """The scan for this pet, or None. A scan made for another pet is thrown away."""
+    scan = st.session_state.scan
+    if scan is not None and scan["pet_id"] != pet["id"]:
+        st.session_state.scan = scan = None
+    return scan
+
+
+def show_food_scanner(pet):
+    """Food & Allergy Scanner: local image processing and OCR, rule-based check, then Claude."""
+    with st.expander("🔍 Food & Allergy Scanner"):
+        scan = current_scan(pet)
+        st.caption(
+            f"Photograph or upload a food or treat label. The photo is processed and read **on this computer**; "
+            f"PetPulse then checks the ingredients against {pet['name']}'s recorded allergies and asks Claude to "
+            "explain. Photos and results are not saved."
+        )
+        version = st.session_state.scan_versions.get(pet["id"], 0)
+        source = st.radio("Image source", ["📁 Upload image", "📷 Take a picture"], horizontal=True,
+                          key=f"scan_source_{pet['id']}", label_visibility="collapsed")
+        if source.startswith("📁"):
+            photo = st.file_uploader("Food label photo (JPG or PNG)", type=["jpg", "jpeg", "png"],
+                                     key=f"scan_upload_{pet['id']}_{version}")
+        else:
+            photo = st.camera_input("Take a photo of the label", key=f"scan_camera_{pet['id']}_{version}")
+        if photo is None:
+            st.session_state.scan = None
+            return
+
+        data = photo.getvalue()
+        image_id = hashlib.sha256(data).hexdigest()
+        if scan is not None and scan["image_id"] != image_id:
+            st.session_state.scan = scan = None  # a new photo needs a new analysis
+        if scan is None:
+            try:
+                st.image(data, caption="Preview", width=320)
+            except Exception:
+                st.warning("This file can't be previewed. It may not be a valid image.")
+
+        # Only this button starts processing, so reruns never repeat it.
+        if st.button("Analyze Food Label", type="primary", key=f"scan_analyze_{pet['id']}"):
+            with st.spinner("Processing the photo and reading the label on this computer…"):
+                scan = analyze_label_photo(pet, data, image_id)
+            st.session_state.scan = scan
+        if scan is not None:
+            show_scan_results(pet, scan)
+
+
+def analyze_label_photo(pet, data, image_id):
+    """Run the local pipeline (validation, preprocessing, OCR). No Claude call here."""
+    scan = {"pet_id": pet["id"], "image_id": image_id, "error": None, "warnings": [], "conversation": [],
+            "claude_error": None, "evidence": None}
+    try:
+        prepared = vision.prepare_label_image(data)
+        ocr = vision.extract_ingredients_text(prepared.ocr_image)
+    except vision.VisionError as error:
+        scan["error"] = str(error)
+        return scan
+
+    if prepared.is_blurry:
+        scan["warnings"].append(
+            f"The photo looks blurry (sharpness {prepared.blur_score:.0f}; below {vision.BLUR_THRESHOLD:.0f} is "
+            "usually too soft). Please retake it closer, in good light. This check is only a rough guide."
+        )
+    if not ocr.readable:
+        scan["warnings"].append(
+            f"Little readable text was found ({ocr.word_count} words, average confidence {ocr.confidence:.0f}%). "
+            "Please fix the text below or upload a clearer photo."
+        )
+    claude_image, media_type = vision.image_for_claude(prepared.color)
+    scan.update(
+        ocr_text=ocr.text, ocr_confidence=ocr.confidence, ocr_readable=ocr.readable,
+        is_blurry=prepared.is_blurry, claude_image=claude_image, media_type=media_type,
+    )
+    return scan
+
+
+def show_scan_results(pet, scan):
+    if scan["error"]:
+        st.error(scan["error"])
+        return
+
+    st.markdown("##### 1. Image processing")
+    st.image(scan["claude_image"], caption="Processed photo (orientation fixed, resized)", width=320)
+    st.caption(f"🖥️ Processed and read on this computer · OCR confidence {scan['ocr_confidence']:.0f}%")
+    for warning in scan["warnings"]:
+        st.warning(warning)
+    text = st.text_area(
+        "Ingredient text read from the label — please check it and fix any mistakes:",
+        value=scan["ocr_text"], height=160, key=f"scan_text_{scan['image_id'][:16]}",
+    )
+    edited = text.strip() != scan["ocr_text"].strip()
+    # A blurry photo is never "verified", even if the text looks fine; otherwise the sitter's edits count.
+    reliable = not scan["is_blurry"] and (scan["ocr_readable"] or edited)
+
+    st.markdown("##### 2. Allergy check (rule-based)")
+    check = food_checker.check_allergens(text, pet["allergies"], pet["diet"], reliable=reliable)
+    st.markdown(f"**{pet['name']}'s recorded allergies:** {pet['allergies'] or 'Not recorded'}  \n"
+                f"**Diet:** {pet['diet'] or 'Not recorded'}")
+    show_status, message = STATUS_DISPLAY[check["status"]]
+    show_status(message)
+    for match in check["matches"]:
+        st.markdown(f"- **{match['phrase']}** matches *{match['allergy']}* ({match['source'].lower()}) "
+                    f"— on the label: “{match['evidence']}”")
+    for reason in check["reasons"][1:]:
+        st.caption(reason)
+
+    st.markdown("##### 3. PetPulse explanation (Claude)")
+    show_label_conversation(pet, scan, text, check)
+
+    if st.button("Scan another label", key=f"scan_reset_{pet['id']}"):
+        st.session_state.scan = None
+        versions = st.session_state.scan_versions
+        versions[pet["id"]] = versions.get(pet["id"], 0) + 1
+        st.rerun()
+
+
+def show_label_conversation(pet, scan, text, check):
+    conversation = scan["conversation"]
+    for message in conversation:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+    if scan["claude_error"]:
+        st.error(f"{scan['claude_error']} The rule-based check above still applies.")
+
+    with st.form(f"label_question_{pet['id']}_{scan['image_id'][:16]}", clear_on_submit=True):
+        label = "Ask a follow-up about this label" if conversation else "Your question"
+        question = st.text_input(label, value="" if conversation else f"Can {pet['name']} eat this?")
+        asked = st.form_submit_button("Ask PetPulse about this label")
+    # Claude is only called on the run right after this click.
+    if asked and question.strip():
+        try:
+            with st.spinner("Asking PetPulse…"):
+                reply = chat.get_label_reply(pet["id"], scan["claude_image"], scan["media_type"], text, check,
+                                             question.strip(), conversation)
+        except chat.AgentError as error:
+            scan["claude_error"] = str(error)
+        else:
+            conversation += [{"role": "user", "content": question.strip()}, {"role": "assistant", "content": reply}]
+            scan["claude_error"] = None
+            scan["evidence"] = {"text": text, "check": check}
+        st.rerun()
+
+    evidence = scan["evidence"]
+    if evidence:
+        with st.expander("Evidence used for the explanation"):
+            st.markdown(f"**Owner-recorded allergies:** {pet['allergies'] or 'Not recorded'}  \n"
+                        f"**Diet:** {pet['diet'] or 'Not recorded'}  \n"
+                        f"**Rule-based result:** {evidence['check']['status'].replace('_', ' ').title()}")
+            phrases = ", ".join(m["phrase"] for m in evidence["check"]["matches"]) or "none"
+            st.markdown(f"**Matched ingredient phrases:** {phrases}")
+            st.text(evidence["text"] or "(no text)")
+            if evidence["text"] != text:
+                st.caption("The text has changed since this answer. Ask again to use the new text.")
 
 
 def show_pet_memory(pet):
@@ -494,6 +664,7 @@ def show_sitter_dashboard():
 
     show_pet_summary(pet)
     show_pet_memory(pet)
+    show_food_scanner(pet)
     st.divider()
     show_chat(pet)
 
