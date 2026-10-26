@@ -227,13 +227,19 @@ def show_chat(pet):
                 st.markdown(message["content"])
 
     question = st.chat_input(f"Ask about {pet['name']}'s care…", key="sitter_chat_input")
+    # chat_input only returns the question on the run right after the sitter sends it,
+    # so Streamlit reruns (clicks, expanders) never call Claude again.
     if question:
-        reply = chat.send_message(chats, pet, question)
         with messages:
             with st.chat_message("user"):
                 st.markdown(question)
             with st.chat_message("assistant"):
-                st.markdown(reply)
+                try:
+                    with st.spinner("Thinking…"):
+                        reply = chat.send_message(chats, pet, question)
+                    st.markdown(reply)
+                except chat.AgentError as error:
+                    st.error(str(error))
 
 
 def show_sitter_dashboard():

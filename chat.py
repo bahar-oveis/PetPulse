@@ -1,16 +1,17 @@
 """
 PetPulse sitter chat.
 
-Keeps a separate conversation for each pet and produces the assistant's replies.
-This file has no Streamlit code, so it is easy to test and, in Phase 4, easy to
-connect to the OpenAI agent.
+Keeps a separate conversation for each pet and gets the assistant's replies
+from the Claude agent in agent.py. This file has no Streamlit code, so it is
+easy to test.
 
 Conversations are stored in a plain dictionary ("store") that maps a pet ID to a
 list of messages. In the app, the store lives in st.session_state.
 Each message looks like: {"role": "user" or "assistant", "content": "..."}
 """
 
-import database as db
+import agent
+from agent import AgentError  # app.py catches chat.AgentError to show friendly errors
 
 
 def welcome_message(pet):
@@ -35,26 +36,26 @@ def clear_history(store, pet_id):
 
 def get_reply(pet_id, question, history):
     """
-    Return the assistant's answer to the sitter's question.
+    Return Claude's answer to the sitter's question.
 
     pet_id comes from the app (the pet the sitter selected), never from the AI,
-    so the assistant can only ever talk about that one pet.
-
-    Phase 4: replace the placeholder below with a call to the agent in agent.py.
+    so the assistant can only ever see that one pet's profile.
+    history is the earlier conversation, without the current question.
+    Raises AgentError with a friendly message if the answer couldn't be produced.
     """
-    pet = db.get_pet(pet_id)
-    if pet is None:
-        return "Sorry, I couldn't find this pet's profile."
-    return (
-        "I'm not connected to the AI agent yet. In Phase 4, I'll be able to "
-        f"answer questions using {pet['name']}'s profile."
-    )
+    return agent.ask(pet_id, question, history)
 
 
 def send_message(store, pet, question):
-    """Add the sitter's question and the assistant's reply to this pet's conversation."""
+    """
+    Add the sitter's question and the assistant's reply to this pet's conversation.
+
+    If the assistant fails, the question stays in the chat but no reply is saved,
+    and the AgentError is passed on so the app can show a friendly error.
+    """
     history = get_history(store, pet)
+    earlier = list(history)
     history.append({"role": "user", "content": question})
-    reply = get_reply(pet["id"], question, history)
+    reply = get_reply(pet["id"], question, earlier)
     history.append({"role": "assistant", "content": reply})
     return reply

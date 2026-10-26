@@ -4,15 +4,15 @@ PetPulse is an AI-powered pet care assistant for pet owners and pet sitters.
 
 - **Pet owners** create profiles with their pets' habits, feeding routines,
   allergies, sensitivities, medical history, and emergency information.
-- **Pet sitters** will chat with an AI assistant that gives personalized
+- **Pet sitters** chat with an AI assistant (Claude) that gives personalized
   guidance based on each pet's profile.
 
 ## Dependencies
 
 - [Streamlit](https://streamlit.io) – web interface
-- [OpenAI Agents SDK](https://openai.github.io/openai-agents-python/) (`openai-agents`) – AI assistant (future phase)
+- [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) (`anthropic`) – Claude AI assistant for sitters
 - [python-dotenv](https://pypi.org/project/python-dotenv/) – loads settings from `.env`
-- SQLite (built into Python) – database (future phase)
+- SQLite (built into Python) – database
 
 ## Setup
 
@@ -28,7 +28,8 @@ PetPulse is an AI-powered pet care assistant for pet owners and pet sitters.
    pip install -r requirements.txt
    ```
 
-3. Create your `.env` file from the example and add your OpenAI API key:
+3. Create your `.env` file from the example and add your Anthropic API key
+   (from https://console.anthropic.com):
 
    ```bash
    cp .env.example .env
@@ -52,7 +53,18 @@ database is empty. To start over, stop the app and delete `petpulse.db`.
 python -m unittest -v
 ```
 
-The tests use a temporary database, so your saved pets are not affected.
+The tests use a temporary database, so your saved pets are not affected, and a
+fake Claude client, so they never make paid API calls.
+
+## AI assistant settings
+
+Set these in `.env`:
+
+- `ANTHROPIC_API_KEY` – required for the Pet Sitter chat.
+- `ANTHROPIC_MODEL` – optional, defaults to `claude-haiku-5-5` (low cost).
+
+Each answer prints its token usage in the terminal, e.g.
+`[PetPulse] claude-haiku-5-5: 1450 input / 120 output tokens`.
 
 ## Project files
 
@@ -60,9 +72,10 @@ The tests use a temporary database, so your saved pets are not affected.
 | --- | --- |
 | `app.py` | Streamlit user interface |
 | `chat.py` | Sitter chat: per-pet conversations and replies |
-| `agent.py` | AI assistant (placeholder) |
+| `agent.py` | Claude agent: sends the selected pet's profile with each question |
 | `database.py` | SQLite database for pet profiles |
 | `test_database.py` | Tests for the database functions |
 | `test_chat.py` | Tests for the sitter chat |
+| `test_agent.py` | Tests for the Claude agent (no real API calls) |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Example environment settings |
