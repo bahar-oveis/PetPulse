@@ -66,6 +66,19 @@ Set these in `.env`:
 Each answer prints its token usage in the terminal, e.g.
 `[PetPulse] claude-haiku-5-5: 1450 input / 120 output tokens`.
 
+## Voice mode (push-to-talk)
+
+In the Pet Sitter tab, record a question, check or edit the transcribed text,
+then click **Send to PetPulse**. The answer appears in the chat and as a spoken
+audio player.
+
+- Speech to text runs on this computer with
+  [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base` model, CPU,
+  INT8). The model (about 140 MB) is downloaded once on the first recording.
+- Text to speech uses the macOS `say` command, so spoken answers need macOS.
+- Recordings are sent from the browser to the local Streamlit server, kept in
+  memory, and never saved. Only the confirmed text goes to Claude.
+
 ## Project files
 
 | File | Purpose |
@@ -76,6 +89,8 @@ Each answer prints its token usage in the terminal, e.g.
 | `database.py` | SQLite database for pet profiles |
 | `test_database.py` | Tests for the database functions |
 | `test_chat.py` | Tests for the sitter chat |
+| `voice.py` | Local speech to text (faster-whisper) and text to speech (macOS `say`) |
 | `test_agent.py` | Tests for the Claude agent (no real API calls) |
+| `test_voice.py` | Tests for voice mode (Whisper, `say`, and Claude mocked) |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Example environment settings |

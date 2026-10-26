@@ -54,6 +54,11 @@ st.session_state.setdefault("add_form_version", 0)
 st.session_state.setdefault("flash", None)
 # Sitter chats: {pet_id: [messages]}, so each pet has its own conversation.
 st.session_state.setdefault("chats", {})
+# Voice questions: pending transcription and spoken answers (see chat.py), the
+# recorder "version" per pet (bumped to clear the recorder), and an error to show once.
+st.session_state.setdefault("voice", {})
+st.session_state.setdefault("voice_versions", {})
+st.session_state.setdefault("voice_notice", None)
 
 
 def pet_form_fields(key_prefix, pet=None):
@@ -217,6 +222,8 @@ def show_chat(pet):
     title_col.markdown("#### 💬 Ask PetPulse")
     if button_col.button("Clear Chat", key=f"clear_chat_{pet['id']}", width="stretch"):
         chat.clear_history(chats, pet["id"])
+        chat.clear_voice(st.session_state.voice, pet["id"])
+        reset_recorder(pet["id"])
 
     history = chat.get_history(chats, pet)
     # Fixed-height board: messages scroll inside it instead of making the page longer.
@@ -225,6 +232,13 @@ def show_chat(pet):
         for message in history:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
+
+    spoken = st.session_state.voice.get("replies", {}).get(pet["id"])
+    if spoken and spoken["audio"]:
+        st.caption("🔊 Spoken answer to your last voice question")
+        st.audio(spoken["audio"], format="audio/wav")
+    elif spoken:
+        st.info(f"🔇 {spoken['error']}")
 
     question = st.chat_input(f"Ask about {pet['name']}'s care…", key="sitter_chat_input")
     # chat_input only returns the question on the run right after the sitter sends it,
@@ -240,6 +254,65 @@ def show_chat(pet):
                     st.markdown(reply)
                 except chat.AgentError as error:
                     st.error(str(error))
+
+    show_voice_input(pet)
+
+
+def reset_recorder(pet_id):
+    """Give this pet's recorder a new key, so it starts empty on the next run."""
+    versions = st.session_state.voice_versions
+    versions[pet_id] = versions.get(pet_id, 0) + 1
+
+
+def show_voice_input(pet):
+    """Push-to-talk: record, check the transcription, then send it like a typed question."""
+    voice_state = st.session_state.voice
+    # Drops a recording made for a different pet, so it can't be sent to this one.
+    pending = chat.pending_voice_question(voice_state, pet["id"])
+
+    st.markdown("#### 🎙️ Ask by voice")
+    st.caption(
+        "Record your question, check the text, then send it. Speech is turned into text "
+        "on this computer; only the confirmed text is sent to Claude. "
+        "Allow microphone access when your browser asks, or type your question instead."
+    )
+
+    notice = st.session_state.voice_notice
+    if notice and notice["pet_id"] == pet["id"]:
+        st.error(notice["message"])
+    st.session_state.voice_notice = None
+
+    version = st.session_state.voice_versions.get(pet["id"], 0)
+    recording = st.audio_input(
+        "Record a question", key=f"voice_input_{pet['id']}_{version}", label_visibility="collapsed"
+    )
+    if recording is None:
+        if pending:  # the sitter deleted the recording
+            voice_state.pop("pending")
+        return
+
+    with st.spinner("Transcribing on this computer…"):
+        pending = chat.transcribe_recording(voice_state, pet["id"], recording.getvalue())
+    if pending["error"]:
+        st.warning(pending["error"])
+        return
+
+    text = st.text_area(
+        "Check the question and fix any mistakes before sending:",
+        value=pending["text"],
+        key=f"voice_text_{pending['audio_id'][:16]}",
+    )
+    if st.button("Send to PetPulse", type="primary", key=f"voice_send_{pet['id']}"):
+        if not text.strip():
+            st.warning("The question is empty. Please record it again or type it.")
+            return
+        try:
+            with st.spinner("Thinking…"):
+                chat.send_voice_question(st.session_state.chats, voice_state, pet, text)
+        except chat.AgentError as error:
+            st.session_state.voice_notice = {"pet_id": pet["id"], "message": str(error)}
+        reset_recorder(pet["id"])
+        st.rerun()  # show the new messages in the chat and an empty recorder
 
 
 def show_sitter_dashboard():
@@ -275,7 +348,8 @@ st.title("🐾 PetPulse")
 st.caption("AI-powered pet care assistant")
 st.divider()
 
-owner_tab, sitter_tab = st.tabs(["🏠 Pet Owner", "🧑‍🍼 Pet Sitter"])
+# The key keeps the selected tab when the app reruns (e.g. after a voice question).
+owner_tab, sitter_tab = st.tabs(["🏠 Pet Owner", "🧑‍🍼 Pet Sitter"], key="main_tab", on_change="rerun")
 
 # Pet Owner tab
 with owner_tab:
