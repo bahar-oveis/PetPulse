@@ -18,6 +18,7 @@ from unittest import mock
 import agent
 import chat
 import database as db
+import fixtures
 import voice
 from test_agent import FakeClient
 
@@ -141,8 +142,9 @@ class VoiceTestCase(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}, owner_id=self.owner))
 
         self.client = FakeClient(reply="No, Milo is allergic to chicken.")
         self.whisper = FakeWhisper()
@@ -176,7 +178,7 @@ class VoiceChatTests(VoiceTestCase):
 
     def test_confirmed_edited_text_is_sent(self):
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
-        reply = chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken treats?")
+        reply = chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken treats?", user_id=self.owner)
         self.assertEqual(reply, "No, Milo is allergic to chicken.")
         sent = self.client.requests[0]
         self.assertEqual(sent["messages"], [{"role": "user", "content": "Can Milo eat chicken treats?"}])
@@ -186,8 +188,8 @@ class VoiceChatTests(VoiceTestCase):
 
     def test_voice_and_text_share_one_conversation(self):
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
-        chat.send_voice_question(self.store, self.voice_state, self.milo, "What food should Milo eat?")
-        chat.send_message(self.store, self.milo, "What should I avoid?")
+        chat.send_voice_question(self.store, self.voice_state, self.milo, "What food should Milo eat?", user_id=self.owner)
+        chat.send_message(self.store, self.milo, "What should I avoid?", user_id=self.owner)
         self.assertEqual([m["content"] for m in self.client.requests[1]["messages"]], [
             "What food should Milo eat?",
             "No, Milo is allergic to chicken.",
@@ -199,9 +201,9 @@ class VoiceChatTests(VoiceTestCase):
             chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
         self.assertEqual(len(self.whisper.calls), 1)
 
-        chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?")
+        chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?", user_id=self.owner)
         with self.assertRaises(chat.AgentError):  # nothing pending any more
-            chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?")
+            chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?", user_id=self.owner)
         self.assertEqual(len(self.client.requests), 1)
         voice.synthesize_speech.assert_called_once()
 
@@ -214,7 +216,7 @@ class VoiceChatTests(VoiceTestCase):
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
         self.assertIsNone(chat.pending_voice_question(self.voice_state, self.luna["id"]))
         with self.assertRaises(chat.AgentError):
-            chat.send_voice_question(self.store, self.voice_state, self.luna, "Can Milo eat chicken?")
+            chat.send_voice_question(self.store, self.voice_state, self.luna, "Can Milo eat chicken?", user_id=self.owner)
         self.assertIsNone(chat.pending_voice_question(self.voice_state, self.milo["id"]))  # gone for Milo too
         self.assertEqual(self.client.requests, [])
 
@@ -227,7 +229,7 @@ class VoiceChatTests(VoiceTestCase):
     def test_tts_failure_keeps_text_answer(self):
         voice.synthesize_speech.side_effect = voice.VoiceError("The spoken answer couldn't be created.")
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
-        reply = chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?")
+        reply = chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?", user_id=self.owner)
         self.assertEqual(reply, "No, Milo is allergic to chicken.")
         self.assertEqual(chat.get_history(self.store, self.milo)[-1]["content"], reply)
         spoken = self.voice_state["replies"][self.milo["id"]]
@@ -238,7 +240,7 @@ class VoiceChatTests(VoiceTestCase):
         self.client.error = RuntimeError("boom")
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
         with mock.patch("traceback.print_exc"), self.assertRaises(chat.AgentError):
-            chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?")
+            chat.send_voice_question(self.store, self.voice_state, self.milo, "Can Milo eat chicken?", user_id=self.owner)
         self.assertEqual([m["role"] for m in chat.get_history(self.store, self.milo)], ["assistant", "user"])
         self.assertNotIn(self.milo["id"], self.voice_state.get("replies", {}))
         voice.synthesize_speech.assert_not_called()
@@ -246,13 +248,13 @@ class VoiceChatTests(VoiceTestCase):
     def test_empty_confirmed_text_is_not_sent(self):
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
         with self.assertRaises(chat.AgentError):
-            chat.send_voice_question(self.store, self.voice_state, self.milo, "   ")
+            chat.send_voice_question(self.store, self.voice_state, self.milo, "   ", user_id=self.owner)
         self.assertEqual(self.client.requests, [])
         self.assertIsNotNone(chat.pending_voice_question(self.voice_state, self.milo["id"]))  # can still edit
 
     def test_clear_voice_only_affects_one_pet(self):
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING)
-        chat.send_voice_question(self.store, self.voice_state, self.milo, "Q")
+        chat.send_voice_question(self.store, self.voice_state, self.milo, "Q", user_id=self.owner)
         self.voice_state["replies"][self.luna["id"]] = {"audio": SPOKEN, "error": None}
         chat.transcribe_recording(self.voice_state, self.milo["id"], RECORDING + b"\x02")
         chat.clear_voice(self.voice_state, self.milo["id"])
@@ -268,9 +270,12 @@ class VoiceAppTests(VoiceTestCase):
         super().setUp()
         from streamlit.testing.v1 import AppTest
 
-        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30).run()
+        self.sitter = fixtures.make_sitter()
+        fixtures.grant(self.owner, self.milo["id"], self.sitter)
+        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30)
+        self.at.session_state["user_id"] = self.sitter  # signed in as the sitter
+        self.at.run()
         self.assertFalse(self.at.exception)
-        self.at.selectbox(key="sitter_pet_id").set_value(self.milo["id"]).run()
         self.at.radio(key="chat_mode").set_value("🎙️ Voice Message").run()
 
     def record(self, audio=RECORDING):
@@ -282,7 +287,7 @@ class VoiceAppTests(VoiceTestCase):
         return [box for box in self.at.text_area if (box.key or "").startswith("voice_text_")]
 
     def chat_texts(self):
-        return [m.markdown[0].value for m in self.at.tabs[1].chat_message if m.markdown]
+        return [m.markdown[0].value for m in self.at.chat_message if m.markdown]
 
     def test_record_review_send_and_listen(self):
         self.record()
@@ -308,9 +313,11 @@ class VoiceAppTests(VoiceTestCase):
 
     def test_switching_pets_discards_recording(self):
         self.record()
-        self.at.selectbox(key="sitter_pet_id").set_value(self.luna["id"]).run()
+        fixtures.move_sitter(self.owner, self.milo["id"], self.luna["id"], self.sitter)
+        self.at.run()
         self.assertEqual(len(self.voice_boxes()), 0)
-        self.at.selectbox(key="sitter_pet_id").set_value(self.milo["id"]).run()
+        fixtures.move_sitter(self.owner, self.luna["id"], self.milo["id"], self.sitter)
+        self.at.run()
         self.assertEqual(len(self.voice_boxes()), 0)  # Milo's old recording is gone too
         self.assertEqual(self.client.requests, [])
 

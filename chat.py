@@ -21,7 +21,7 @@ import hashlib
 
 import agent
 import voice
-from agent import AgentError  # app.py catches chat.AgentError to show friendly errors
+from agent import AccessEnded, AgentError  # app.py catches these to show friendly errors
 
 
 def welcome_message(pet):
@@ -44,24 +44,25 @@ def clear_history(store, pet_id):
     store.pop(pet_id, None)
 
 
-def get_reply(pet_id, question, history):
+def get_reply(pet_id, question, history, *, user_id):
     """
     Return Claude's answer to the sitter's question.
 
-    pet_id comes from the app (the pet the sitter selected), never from the AI,
-    so the assistant can only ever see that one pet's profile.
+    pet_id comes from the app, never from the AI, and user_id is the signed-in
+    user; the agent checks in the database that this user may use this pet.
     history is the earlier conversation, without the current question.
     Raises AgentError with a friendly message if the answer couldn't be produced.
     """
-    return agent.ask(pet_id, question, history)
+    return agent.ask(pet_id, question, history, user_id=user_id)
 
 
-def get_label_reply(pet_id, image_bytes, media_type, label_text, check, question, history=()):
+def get_label_reply(pet_id, image_bytes, media_type, label_text, check, question, history=(), *, user_id):
     """Claude's answer about a scanned food label (same agent, with the photo and label data)."""
-    return agent.ask_about_label(pet_id, image_bytes, media_type, label_text, check, question, history)
+    return agent.ask_about_label(pet_id, image_bytes, media_type, label_text, check, question, history,
+                                 user_id=user_id)
 
 
-def send_message(store, pet, question):
+def send_message(store, pet, question, *, user_id):
     """
     Add the sitter's question and the assistant's reply to this pet's conversation.
 
@@ -71,7 +72,7 @@ def send_message(store, pet, question):
     history = get_history(store, pet)
     earlier = list(history)
     history.append({"role": "user", "content": question})
-    reply = get_reply(pet["id"], question, earlier)
+    reply = get_reply(pet["id"], question, earlier, user_id=user_id)
     history.append({"role": "assistant", "content": reply})
     return reply
 
@@ -113,7 +114,7 @@ def pending_voice_question(voice_state, pet_id):
     return pending
 
 
-def send_voice_question(store, voice_state, pet, text):
+def send_voice_question(store, voice_state, pet, text, *, user_id):
     """
     Send a confirmed (and possibly edited) voice question, then create the spoken answer.
 
@@ -131,7 +132,7 @@ def send_voice_question(store, voice_state, pet, text):
 
     voice_state.pop("pending")  # sent once; reruns can't send it again
     voice_state.setdefault("replies", {}).pop(pet["id"], None)
-    reply = send_message(store, pet, question)
+    reply = send_message(store, pet, question, user_id=user_id)
 
     try:
         audio, error = voice.synthesize_speech(reply), None

@@ -5,6 +5,8 @@ import streamlit as st
 import hashlib
 from datetime import datetime
 
+import access
+import auth
 import chat
 import database as db
 import food_checker
@@ -14,9 +16,8 @@ import vision
 
 st.set_page_config(page_title="PetPulse", page_icon="🐾", layout="centered")
 
-# Make sure the database exists, and add the demo pet on first run.
+# Create or update the database tables (existing data is kept; see database.init_db).
 db.init_db()
-db.add_demo_pet_if_empty()
 
 # Profile sections: (title, [(field, label), ...]). Used by the forms and the profile view.
 SECTIONS = [
@@ -127,7 +128,7 @@ def show_profile(pet):
     st.caption(f"Created: {pet['created_at']} · Last updated: {pet['updated_at']}")
 
 
-def show_edit_form(pet):
+def show_edit_form(user, pet):
     """Show a pre-filled form for editing an existing pet."""
     with st.form(f"edit_pet_form_{pet['id']}"):
         st.markdown(f"### ✏️ Editing {pet['name']}")
@@ -144,14 +145,14 @@ def show_edit_form(pet):
         if missing:
             st.error(f"Please fill in: {', '.join(missing)}")
         else:
-            db.update_pet(pet["id"], values)
+            access.update_owner_pet(user["id"], pet["id"], values)  # checks that this owner owns the pet
             st.session_state.editing_pet_id = None
             st.session_state.flash = f"✅ {values['name'].strip()}'s profile was updated."
             st.rerun()
 
 
-def show_my_pets():
-    pets = db.get_all_pets()
+def show_my_pets(user):
+    pets = access.list_owner_pets(user["id"])  # only this owner's pets
     if not pets:
         st.info("No pets yet. Add your first pet in **Add New Pet**.")
         return
@@ -171,7 +172,7 @@ def show_my_pets():
     pet = pets_by_id[selected_id]
 
     if st.session_state.editing_pet_id == pet["id"]:
-        show_edit_form(pet)
+        show_edit_form(user, pet)
     else:
         title_col, button_col = st.columns([3, 1])
         title_col.markdown(f"### 🐾 {pet['name']}")
@@ -179,12 +180,62 @@ def show_my_pets():
             st.session_state.editing_pet_id = pet["id"]
             st.rerun()
         show_profile(pet)
+        show_access_management(user, pet)
         with st.expander("📝 Sitter observations (unverified)"):
             st.caption("Notes saved by pet sitters. They are not added to the profile above.")
-            show_memory_timeline(pet, can_delete=False)
+            show_memory_timeline(user, pet)
 
 
-def show_add_pet():
+def show_access_management(user, pet):
+    """Owner: see who has access, create a one-time invitation code, rotate it, or revoke access."""
+    with st.expander("🔑 Manage Sitter Access", expanded=True):
+        new_code = st.session_state.get("new_invite")
+        if new_code and new_code["pet_id"] == pet["id"]:
+            st.success(
+                f"Share this access code with {pet['name']}'s sitter. It works **once**, expires in "
+                f"{access.INVITE_TTL_HOURS} hours, and is **shown only now** — PetPulse stores only a scrambled "
+                "(hashed) version."
+            )
+            st.code(new_code["code"], language=None)
+        st.session_state.new_invite = None  # shown once
+
+        status = access.access_status(user["id"], pet["id"])
+        sitter = status["sitter_email"]
+        if sitter:
+            st.markdown(f"👤 **Current sitter:** {sitter} (since {status['granted_at']})")
+        else:
+            st.markdown("👤 **Current sitter:** none")
+        if status["open_invite"]:
+            st.caption(f"An unused access code is waiting (expires {status['open_invite']['expires_at']}).")
+
+        def issue(make_code):
+            st.session_state.new_invite = {"pet_id": pet["id"], "code": make_code(user["id"], pet["id"])}
+            st.rerun()
+
+        if not sitter:
+            label = "Generate New Access Key" if status["open_invite"] else "Generate Access Key"
+            if st.button(label, type="primary", key=f"invite_{pet['id']}"):
+                issue(access.create_invite)  # cancels any unused code
+            if status["open_invite"] and st.button("Cancel unused code", key=f"cancel_invite_{pet['id']}"):
+                access.revoke_access(user["id"], pet["id"])
+                st.rerun()
+            return
+
+        st.caption(
+            f"**Rotate** ends {sitter}'s access immediately and creates a new code for another sitter. "
+            "**Revoke** ends their access without a new code."
+        )
+        confirmed = st.checkbox(f"Yes, end {sitter}'s access to {pet['name']}", key=f"confirm_revoke_{pet['id']}")
+        rotate_col, revoke_col = st.columns(2)
+        if rotate_col.button("Rotate Access Key", disabled=not confirmed, key=f"rotate_{pet['id']}", width="stretch"):
+            issue(access.rotate_invite)
+        if revoke_col.button("Revoke Sitter Access", disabled=not confirmed, key=f"revoke_{pet['id']}", width="stretch"):
+            access.revoke_access(user["id"], pet["id"])
+            st.session_state.flash = f"✅ {sitter} no longer has access to {pet['name']}."
+            st.rerun()
+
+
+def show_add_pet(user):
     st.caption("Only **Name** and **Species** are required. You can fill in the rest later.")
     version = st.session_state.add_form_version
     with st.form(f"add_pet_form_{version}"):
@@ -196,7 +247,7 @@ def show_add_pet():
         if missing:
             st.error(f"Please fill in: {', '.join(missing)}")
         else:
-            db.create_pet(values)
+            access.create_owner_pet(user["id"], values)  # owned by this account
             st.session_state.add_form_version += 1  # gives the next form fresh, empty fields
             st.session_state.flash = f"✅ {values['name'].strip()} was saved! You can find them in **My Pets**."
             st.rerun()
@@ -249,7 +300,7 @@ def current_scan(pet):
     return scan
 
 
-def show_food_scanner(pet):
+def show_food_scanner(user, pet):
     """Food & Allergy Scanner: local image processing and OCR, rule-based check, then Claude."""
     with st.expander("🔍 Food & Allergy Scanner"):
         scan = current_scan(pet)
@@ -282,11 +333,12 @@ def show_food_scanner(pet):
 
         # Only this button starts processing, so reruns never repeat it.
         if st.button("Analyze Food Label", type="primary", key=f"scan_analyze_{pet['id']}"):
+            access.require_pet_access(user["id"], pet["id"], access.VISION)
             with st.spinner("Processing the photo and reading the label on this computer…"):
                 scan = analyze_label_photo(pet, data, image_id)
             st.session_state.scan = scan
         if scan is not None:
-            show_scan_results(pet, scan)
+            show_scan_results(user, pet, scan)
 
 
 def analyze_label_photo(pet, data, image_id):
@@ -318,7 +370,7 @@ def analyze_label_photo(pet, data, image_id):
     return scan
 
 
-def show_scan_results(pet, scan):
+def show_scan_results(user, pet, scan):
     if scan["error"]:
         st.error(scan["error"])
         return
@@ -349,7 +401,7 @@ def show_scan_results(pet, scan):
         st.caption(reason)
 
     st.markdown("##### 3. PetPulse explanation (Claude)")
-    show_label_conversation(pet, scan, text, check)
+    show_label_conversation(user, pet, scan, text, check)
 
     if st.button("Scan another label", key=f"scan_reset_{pet['id']}"):
         st.session_state.scan = None
@@ -358,7 +410,7 @@ def show_scan_results(pet, scan):
         st.rerun()
 
 
-def show_label_conversation(pet, scan, text, check):
+def show_label_conversation(user, pet, scan, text, check):
     conversation = scan["conversation"]
     for message in conversation:
         with st.chat_message(message["role"]):
@@ -375,7 +427,9 @@ def show_label_conversation(pet, scan, text, check):
         try:
             with st.spinner("Asking PetPulse…"):
                 reply = chat.get_label_reply(pet["id"], scan["claude_image"], scan["media_type"], text, check,
-                                             question.strip(), conversation)
+                                             question.strip(), conversation, user_id=user["id"])
+        except chat.AccessEnded:
+            st.rerun()  # the sitter dashboard will show that access has ended
         except chat.AgentError as error:
             scan["claude_error"] = str(error)
         else:
@@ -397,13 +451,13 @@ def show_label_conversation(pet, scan, text, check):
                 st.caption("The text has changed since this answer. Ask again to use the new text.")
 
 
-def show_pet_memory(pet):
+def show_pet_memory(user, pet):
     """Sitter's Pet Memory: observations that are remembered across visits."""
     with st.expander("📝 Pet Memory"):
         st.caption(
             "Observations saved here are remembered across visits and restarts, and PetPulse can "
             "look them up when answering. They are unverified sitter notes, not owner-approved facts. "
-            "Demo Mode: please use fictional records only."
+            "This is a local demo: please use fictional records only."
         )
         with st.form(f"memory_form_{pet['id']}", clear_on_submit=True):
             note = st.text_area(
@@ -416,33 +470,33 @@ def show_pet_memory(pet):
         if saved:
             try:
                 with st.spinner("Saving…"):
-                    memory.save_pet_memory(pet["id"], note)
+                    access.save_memory(user["id"], pet["id"], note)
                 st.success("✅ Saved to memory.")
             except memory.PetMemoryError as error:
                 st.warning(str(error))
-        show_memory_timeline(pet, can_delete=True)
+        show_memory_timeline(user, pet)
 
 
-def show_memory_timeline(pet, can_delete):
-    """List a pet's observations, newest first."""
-    memories = list(reversed(memory.get_pet_memories(pet["id"])))
+def show_memory_timeline(user, pet):
+    """List a pet's observations, newest first. Owners can delete any; sitters only their own."""
+    memories = list(reversed(access.list_memories(user["id"], pet["id"])))
     if not memories:
         st.caption("No observations recorded yet.")
         return
     for item in memories:
         when = datetime.fromisoformat(item["created_at"]).strftime("%d %b %Y, %H:%M")
         text = f"**{when}** · {item['source']}  \n{item['content']}"
-        if not can_delete:
+        if not access.can_delete_memory(user["id"], pet["id"], item):
             st.markdown(text)
             continue
         text_col, button_col = st.columns([5, 1])
         text_col.markdown(text)
         if button_col.button("Delete", key=f"delete_memory_{item['id']}"):
-            memory.delete_pet_memory(pet["id"], item["id"])
+            access.delete_memory(user["id"], pet["id"], item["id"])
             st.rerun()
 
 
-def show_chat(pet):
+def show_chat(user, pet):
     """Chat with the assistant about the selected pet. Each pet has its own history."""
     chats = st.session_state.chats
 
@@ -458,7 +512,7 @@ def show_chat(pet):
     # A live session only runs while its pet is selected and Live mode is open.
     stop_live_session(keep_pet_id=pet["id"] if mode == LIVE_MODE else None)
     if mode == LIVE_MODE:
-        show_live_conversation(pet)
+        show_live_conversation(user, pet)
         return
 
     messages = show_messages(chat.get_history(chats, pet))
@@ -470,7 +524,7 @@ def show_chat(pet):
             st.audio(spoken["audio"], format="audio/wav")
         elif spoken:
             st.info(f"🔇 {spoken['error']}")
-        show_voice_input(pet)
+        show_voice_input(user, pet)
         return
 
     question = st.chat_input(f"Ask about {pet['name']}'s care…", key="sitter_chat_input")
@@ -483,8 +537,10 @@ def show_chat(pet):
             with st.chat_message("assistant"):
                 try:
                     with st.spinner("Thinking…"):
-                        reply = chat.send_message(chats, pet, question)
+                        reply = chat.send_message(chats, pet, question, user_id=user["id"])
                     st.markdown(reply)
+                except chat.AccessEnded:
+                    st.rerun()  # the sitter dashboard will show that access has ended
                 except chat.AgentError as error:
                     st.error(str(error))
 
@@ -507,7 +563,7 @@ def stop_live_session(keep_pet_id=None):
         st.session_state.live_session = None
 
 
-def show_live_conversation(pet):
+def show_live_conversation(user, pet):
     """Hands-free, turn-based voice chat over WebRTC (see live_voice.py)."""
     from streamlit_webrtc import (
         WebRtcMode,
@@ -518,7 +574,7 @@ def show_live_conversation(pet):
 
     live = st.session_state.live_session
     if live is None or live.state == live_voice.STOPPED:
-        live = live_voice.LiveSession(pet, st.session_state.chats)
+        live = live_voice.LiveSession(pet, st.session_state.chats, user_id=user["id"])
         st.session_state.live_session = live
 
     st.caption(
@@ -549,7 +605,7 @@ def show_live_conversation(pet):
     elif live.state != live_voice.IDLE:
         live.stop()
 
-    show_live_status(pet)
+    show_live_status(user, pet)
 
 
 LIVE_STATUS = {
@@ -562,11 +618,15 @@ LIVE_STATUS = {
 
 
 @st.fragment(run_every=1.0)
-def show_live_status(pet):
+def show_live_status(user, pet):
     """Refreshes every second: state, microphone, and the shared conversation."""
     live = st.session_state.live_session
     if live is None:
         return
+    # Re-checked every second: if access was revoked, stop listening and show the ended screen.
+    if live.access_ended or not access.has_pet_access(user["id"], pet["id"], access.VOICE):
+        live.stop()
+        st.rerun(scope="app")
     state = live.state
     if state in (live_voice.LISTENING, live_voice.PROCESSING, live_voice.SPEAKING):
         microphone = "🎤 Microphone on" if live.receiving_audio() else "🎤 Waiting for microphone audio…"
@@ -588,7 +648,7 @@ def reset_recorder(pet_id):
     versions[pet_id] = versions.get(pet_id, 0) + 1
 
 
-def show_voice_input(pet):
+def show_voice_input(user, pet):
     """Push-to-talk: record, check the transcription, then send it like a typed question."""
     voice_state = st.session_state.voice
     # Drops a recording made for a different pet, so it can't be sent to this one.
@@ -615,6 +675,7 @@ def show_voice_input(pet):
             voice_state.pop("pending")
         return
 
+    access.require_pet_access(user["id"], pet["id"], access.VOICE)
     with st.spinner("Transcribing on this computer…"):
         pending = chat.transcribe_recording(voice_state, pet["id"], recording.getvalue())
     if pending["error"]:
@@ -632,74 +693,159 @@ def show_voice_input(pet):
             return
         try:
             with st.spinner("Thinking…"):
-                chat.send_voice_question(st.session_state.chats, voice_state, pet, text)
+                chat.send_voice_question(st.session_state.chats, voice_state, pet, text, user_id=user["id"])
+        except chat.AccessEnded:
+            st.rerun()  # the sitter dashboard will show that access has ended
         except chat.AgentError as error:
             st.session_state.voice_notice = {"pet_id": pet["id"], "message": str(error)}
         reset_recorder(pet["id"])
         st.rerun()  # show the new messages in the chat and an empty recorder
 
 
-def show_sitter_dashboard():
-    pets = db.get_all_pets()
-    if not pets:
-        st.info("No pets are available yet. Ask the pet's owner to create a profile in the **Pet Owner** tab.")
+def clear_pet_state(pet_id):
+    """Forget everything this browser session holds about a pet (chat, voice, live, scan)."""
+    st.session_state.chats.pop(pet_id, None)
+    chat.clear_voice(st.session_state.voice, pet_id)
+    st.session_state.voice_notice = None
+    stop_live_session()
+    st.session_state.scan = None
+
+
+def show_sitter_dashboard(user):
+    st.subheader("Welcome, Pet Sitter!")
+    # Asked from the database on every run, so revoked access takes effect on the next interaction.
+    pet = access.sitter_pet(user["id"])
+    previous = st.session_state.get("active_pet_id")
+    if previous is not None and (pet is None or pet["id"] != previous):
+        clear_pet_state(previous)
+        st.session_state.access_ended = pet is None
+    st.session_state.active_pet_id = pet["id"] if pet else None
+
+    if pet is None:
+        if st.session_state.get("access_ended"):
+            st.error("🔒 The pet's owner has ended your access. Its information is no longer available here.")
+        show_redeem_form(user)
         return
+    st.session_state.access_ended = False
 
-    st.badge("Demo Mode", icon="🧪", color="orange")
-    st.caption(
-        "Selecting a pet simulates being authorized by its owner. "
-        "Access control is not implemented yet."
-    )
-
-    # The selected pet ID is kept in session state by the app. The chat (and the
-    # future AI agent) only ever receives this ID; the AI cannot pick another pet.
-    pets_by_id = {p["id"]: p for p in pets}
-    selected_id = st.selectbox(
-        "Which pet are you caring for?",
-        list(pets_by_id),
-        format_func=lambda pet_id: f"{pets_by_id[pet_id]['name']} ({pets_by_id[pet_id]['species']})",
-        key="sitter_pet_id",
-    )
-    pet = pets_by_id[selected_id]
-
+    st.caption(f"You have access to **{pet['name']}**, given by the owner.")
     show_pet_summary(pet)
-    show_pet_memory(pet)
-    show_food_scanner(pet)
+    show_pet_memory(user, pet)
+    show_food_scanner(user, pet)
     st.divider()
-    show_chat(pet)
+    show_chat(user, pet)
 
 
-# Header
-st.title("🐾 PetPulse")
-st.caption("AI-powered pet care assistant")
-st.divider()
+def show_redeem_form(user):
+    st.write("Enter the access code you received from the pet's owner.")
+    with st.form("redeem_form", clear_on_submit=True):
+        code = st.text_input("Access code", type="password")
+        submitted = st.form_submit_button("Redeem Code", type="primary")
+    if submitted:
+        try:
+            access.redeem_invite(user["id"], code)
+        except access.AccessDenied as error:
+            st.error(str(error))
+        else:
+            st.session_state.access_ended = False
+            st.rerun()
 
-# The key keeps the selected tab when the app reruns (e.g. after a voice question).
-owner_tab, sitter_tab = st.tabs(["🏠 Pet Owner", "🧑‍🍼 Pet Sitter"], key="main_tab", on_change="rerun")
 
-# Pet Owner tab
-with owner_tab:
+def show_owner_dashboard(user):
     st.subheader("Welcome, Pet Owner!")
     st.write(
         "Create profiles for your pets with their habits, feeding routines, "
-        "allergies, medical history, and emergency information."
+        "allergies, medical history, and emergency information, and share access with a sitter."
     )
-
     if st.session_state.flash:
         st.success(st.session_state.flash)
         st.session_state.flash = None
 
     view = st.radio("View", ["My Pets", "Add New Pet"], horizontal=True, label_visibility="collapsed")
     if view == "My Pets":
-        show_my_pets()
+        show_my_pets(user)
     else:
-        show_add_pet()
+        show_add_pet(user)
 
-# Pet Sitter tab
-with sitter_tab:
-    st.subheader("Welcome, Pet Sitter!")
-    st.write(
-        "Get personalized guidance for the pets you care for, "
-        "based on each pet's profile."
-    )
-    show_sitter_dashboard()
+
+def start_session(user_id):
+    """Start a fresh browser session for this account, so nothing from a previous user remains."""
+    stop_live_session()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    if user_id is not None:
+        st.session_state.user_id = user_id
+
+
+def show_login_page():
+    st.write("Log in or create an account to continue.")
+    login_tab, register_tab = st.tabs(["Log in", "Create account"])
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in", type="primary")
+        if submitted:
+            try:
+                user = auth.login(email, password)
+            except auth.AuthError as error:
+                st.error(str(error))
+            else:
+                start_session(user["id"])
+                st.rerun()
+    with register_tab:
+        with st.form("register_form"):
+            role = st.radio("I am a…", ["owner", "sitter"], horizontal=True,
+                            format_func=lambda r: "🏠 Pet Owner" if r == "owner" else "🧑‍🍼 Pet Sitter")
+            email = st.text_input("Email", key="register_email")
+            password = st.text_input(f"Password (at least {auth.MIN_PASSWORD_LENGTH} characters)", type="password",
+                                     key="register_password")
+            repeat = st.text_input("Repeat password", type="password", key="register_repeat")
+            submitted = st.form_submit_button("Create account", type="primary")
+        st.caption("The account type can't be changed later.")
+        if submitted:
+            if password != repeat:
+                st.error("The passwords don't match.")
+            else:
+                try:
+                    user = auth.register_user(email, password, role)
+                except auth.AuthError as error:
+                    st.error(str(error))
+                else:
+                    start_session(user["id"])
+                    st.rerun()
+
+
+# Header
+st.title("🐾 PetPulse")
+st.caption("AI-powered pet care assistant")
+
+# The session only remembers the account ID; the account (and its role) is re-read from the database.
+current_user = auth.get_user(st.session_state.get("user_id"))
+if current_user is None:
+    if st.session_state.get("user_id") is not None:
+        start_session(None)  # the account no longer exists
+    st.divider()
+    show_login_page()
+    st.stop()
+
+role_label = "Pet Owner" if current_user["role"] == "owner" else "Pet Sitter"
+account_col, logout_col = st.columns([4, 1])
+account_col.caption(f"Signed in as **{current_user['email']}** · {role_label}")
+if logout_col.button("Log out", width="stretch"):
+    start_session(None)
+    st.rerun()
+st.divider()
+
+try:
+    if current_user["role"] == "owner":
+        show_owner_dashboard(current_user)
+    else:
+        show_sitter_dashboard(current_user)
+except access.AccessDenied as denied:
+    # Access changed while this page was being built (e.g. the owner just revoked it).
+    if current_user["role"] == "sitter":
+        assigned = access.sitter_pet(current_user["id"])
+        if assigned is None or assigned["id"] != st.session_state.get("active_pet_id"):
+            st.rerun()  # access changed: the next run shows the "access ended" screen
+    st.error(str(denied))

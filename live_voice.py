@@ -186,9 +186,11 @@ class LiveSession:
     this session and starting a new one, so audio and answers can't cross pets.
     """
 
-    def __init__(self, pet, store, settings=None, vad=None, clock=time.monotonic):
+    def __init__(self, pet, store, settings=None, vad=None, clock=time.monotonic, *, user_id):
         self.pet = dict(pet)
         self.pet_id = pet["id"]
+        self.user_id = user_id  # the signed-in user; access is checked on every question
+        self.access_ended = False
         self.store = store
         self.settings = settings or LiveSettings()
         self.clock = clock
@@ -407,7 +409,12 @@ class LiveSession:
         earlier = list(history)
         history.append({"role": "user", "content": question})
         try:
-            reply = chat.get_reply(self.pet_id, question, earlier)
+            reply = chat.get_reply(self.pet_id, question, earlier, user_id=self.user_id)
+        except chat.AccessEnded as error:
+            self.notice = str(error)
+            self.access_ended = True
+            self.stop()  # no more listening or speaking for a pet this user can't access
+            return
         except chat.AgentError as error:
             self.notice = str(error)
             self._resume_listening()

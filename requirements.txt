@@ -8,3 +8,4 @@ numpy
 pillow
 opencv-python-headless
 pytesseract
+argon2-cffi

@@ -43,9 +43,61 @@ streamlit run app.py
 
 Then open http://localhost:8501 in your browser.
 
-On first start, the app creates `petpulse.db` and adds **Milo**, a fictional
-demo dog, so there is something to look at. Milo is added only when the
-database is empty. To start over, stop the app and delete `petpulse.db`.
+Log in or create an account first (see **Accounts and access** below). To
+set up the fictional demo (two owners, two sitters, Milo, and Luna):
+
+```bash
+python manage.py seed-demo
+```
+
+## Accounts and access
+
+- **Pet Owners** create pets, edit them, and decide who may help: in
+  **🔑 Manage Sitter Access** they generate a one-time access code for a pet,
+  rotate it (which ends the current sitter's access immediately), or revoke
+  access.
+- **Pet Sitters** redeem a code and then see only that one pet: profile
+  summary, chat, voice, live conversation, food scanner, and Pet Memory. They
+  can't edit the profile. Each pet has at most one sitter, and each sitter
+  cares for one pet at a time.
+- The account type is chosen when the account is created and can't be changed.
+- Passwords are stored only as Argon2id hashes; access codes only as SHA-256
+  hashes. Codes are 32 random characters, single-use, and expire after 24 hours.
+- Every pet operation is checked against the database (`access.py`), including
+  the AI agent's tools. A revoked sitter is locked out on their next click,
+  and an answer Claude was still writing for them is discarded.
+
+### Older databases
+
+Starting the app updates older databases automatically (adding the new
+tables and columns) after saving a copy in `backups/`. Pets that existed
+before accounts have **no owner and are visible to nobody** until you assign
+them on purpose:
+
+```bash
+python manage.py list-unassigned
+python manage.py create-user --email you@example.com --role owner
+python manage.py assign-pets --owner-email you@example.com --pet-id 1
+```
+
+`assign-pets` saves another backup first and asks for confirmation.
+
+### Security limitations (local MVP)
+
+This login is meant for a local demo, not an internet-facing service:
+
+- The login lasts as long as the Streamlit browser session (the session keeps
+  only the account ID; the account and its permissions are re-read from the
+  database on every interaction). Closing the tab or refreshing logs you out.
+  There is no "remember me", password reset, email verification, or 2FA.
+- Rate limiting is basic (per email for logins, per sitter for codes) and
+  stored in SQLite.
+- Revocation applies to the next request: anything a sitter already saw or
+  copied can't be taken back.
+- If you deploy it publicly, use HTTPS, a managed identity provider (for
+  example Streamlit's built-in OIDC login), and hosted persistent storage
+  instead of a local SQLite file.
+- Don't commit `petpulse.db` or `backups/`: they contain accounts and pet data.
 
 ## Run the tests
 
@@ -68,7 +120,7 @@ Each answer prints its token usage in the terminal, e.g.
 
 ## Voice mode (push-to-talk)
 
-In the Pet Sitter tab, record a question, check or edit the transcribed text,
+In the Pet Sitter dashboard, record a question, check or edit the transcribed text,
 then click **Send to PetPulse**. The answer appears in the chat and as a spoken
 audio player.
 
@@ -81,7 +133,7 @@ audio player.
 
 ## Live Conversation (hands-free)
 
-Choose **🔴 Live Conversation** in the Pet Sitter tab and click **Start Live
+Choose **🔴 Live Conversation** in the Pet Sitter dashboard and click **Start Live
 Conversation**. Ask a question and pause for about a second: PetPulse
 transcribes it, answers out loud, and listens again. Click **End Session** to
 stop. Live, Voice Message, and Text Chat share the same conversation.
@@ -104,24 +156,24 @@ stop. Live, Voice Message, and Text Chat share the same conversation.
 
 ## Pet Memory
 
-In the Pet Sitter tab, open **📝 Pet Memory** to save observations from a
+In the Pet Sitter dashboard, open **📝 Pet Memory** to save observations from a
 visit (e.g. "Milo hid under the bed when the doorbell rang."). They are stored
 in the `pet_memories` table of `petpulse.db`, so they survive restarts and
 Clear Chat. When a sitter asks about past behavior, Claude searches them with
 its `recall_pet_memories` tool and presents them as unverified sitter
 observations, separate from the owner's profile. Owners can review them in the
-Pet Owner tab.
+Pet Owner dashboard. Sitters can delete only observations they wrote.
 
 - Embeddings are computed on this computer with
   [sentence-transformers](https://www.sbert.net/) (`all-MiniLM-L6-v2`, about
   90 MB, downloaded once) and compared with NumPy cosine similarity.
 - Searches only ever look at the selected pet's memories.
 - Nothing is saved automatically: only what a sitter saves with **Save to Memory**.
-- Demo Mode: use fictional records only.
+- This is a local demo: use fictional records only.
 
 ## Food & Allergy Scanner (PetPulse Vision)
 
-In the Pet Sitter tab, open **🔍 Food & Allergy Scanner**, upload or take a
+In the Pet Sitter dashboard, open **🔍 Food & Allergy Scanner**, upload or take a
 photo of a food label, and click **Analyze Food Label**.
 
 1. **On this computer:** the image is validated, its orientation fixed, and
@@ -157,6 +209,11 @@ tesseract --version   # check it works
 | `voice.py` | Local speech to text (faster-whisper) and text to speech (macOS `say`) |
 | `test_agent.py` | Tests for the Claude agent (no real API calls) |
 | `live_voice.py` | Live Conversation: voice activity detection and the turn-taking session |
+| `auth.py` | Accounts: registration, Argon2id password hashing, login, rate limiting |
+| `access.py` | Who may do what with which pet; access codes, rotation, and revocation |
+| `manage.py` | Local admin commands: create users, assign older pets, set up the demo |
+| `test_auth.py` | Tests for accounts, access control, invitations, and revocation |
+| `fixtures.py` | Helpers the tests use to create accounts and grant access |
 | `memory.py` | Pet Memory: save, list, delete, and semantically search sitter observations |
 | `vision.py` | Food label images: validation, orientation, resizing, blur check, contrast enhancement, OCR |
 | `food_checker.py` | Rule-based allergy matching for ingredient text |

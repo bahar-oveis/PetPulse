@@ -23,6 +23,7 @@ import numpy as np
 import agent
 import chat
 import database as db
+import fixtures
 import live_voice
 import voice
 from test_agent import FakeClient
@@ -141,8 +142,9 @@ class LiveSessionTests(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}, owner_id=self.owner))
         self.store = {}
         self.client = FakeClient(reply="No, Milo is allergic to chicken.")
         self.transcribe = mock.Mock(return_value="Can Milo eat chicken?")
@@ -166,7 +168,7 @@ class LiveSessionTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def new_session(self, pet):
-        session = live_voice.LiveSession(pet, self.store, vad=fake_vad, clock=self.clock)
+        session = live_voice.LiveSession(pet, self.store, vad=fake_vad, clock=self.clock, user_id=self.owner)
         session.speaker = self.speaker
         session.start(run_worker=False)
         return session
@@ -300,7 +302,8 @@ class LiveSessionTests(unittest.TestCase):
     def test_interruptions_can_be_turned_off(self):
         self.session.stop()
         session = live_voice.LiveSession(
-            self.milo, self.store, settings=live_voice.LiveSettings(barge_in=False), vad=fake_vad, clock=self.clock
+            self.milo, self.store, settings=live_voice.LiveSettings(barge_in=False), vad=fake_vad, clock=self.clock,
+            user_id=self.owner,
         )
         session.speaker = self.speaker
         session.start(run_worker=False)
@@ -334,7 +337,7 @@ class LiveSessionTests(unittest.TestCase):
         self.assertEqual(len(self.speaker.played), 2)
 
     def test_shares_history_with_text_chat(self):
-        chat.send_message(self.store, self.milo, "What food does Milo eat?")
+        chat.send_message(self.store, self.milo, "What food does Milo eat?", user_id=self.owner)
         self.say()
         sent = [m["content"] for m in self.client.requests[1]["messages"]]
         self.assertEqual(sent[0], "What food does Milo eat?")
@@ -448,8 +451,9 @@ class LiveAppTests(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat"}, owner_id=self.owner))
         self.client = FakeClient(reply="Milo eats dry food.")
         patches = [
             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_MODEL": ""}),
@@ -464,8 +468,11 @@ class LiveAppTests(unittest.TestCase):
         for patcher in patches:
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30).run()
-        self.at.selectbox(key="sitter_pet_id").set_value(self.milo["id"]).run()
+        self.sitter = fixtures.make_sitter()
+        fixtures.grant(self.owner, self.milo["id"], self.sitter)
+        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30)
+        self.at.session_state["user_id"] = self.sitter  # signed in as the sitter
+        self.at.run()
 
     def tearDown(self):
         live = self.at.session_state["live_session"] if "live_session" in self.at.session_state else None
@@ -511,7 +518,8 @@ class LiveAppTests(unittest.TestCase):
     def test_switching_pets_stops_the_session(self):
         self.open_live_mode()
         milo_session = self.at.session_state["live_session"]
-        self.at.selectbox(key="sitter_pet_id").set_value(self.luna["id"]).run()
+        fixtures.move_sitter(self.owner, self.milo["id"], self.luna["id"], self.sitter)
+        self.at.run()
         self.assertEqual(milo_session.state, live_voice.STOPPED)
         self.assertEqual(self.at.session_state["live_session"].pet_id, self.luna["id"])
 
@@ -526,7 +534,7 @@ class LiveAppTests(unittest.TestCase):
         self.at.chat_input(key="sitter_chat_input").set_value("What does Milo eat?").run()
         self.assertFalse(self.at.exception)
         self.assertEqual(len(self.client.requests), 1)
-        texts = [m.markdown[0].value for m in self.at.tabs[1].chat_message if m.markdown]
+        texts = [m.markdown[0].value for m in self.at.chat_message if m.markdown]
         self.assertIn("Milo eats dry food.", texts)
 
 

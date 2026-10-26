@@ -16,6 +16,7 @@ from unittest import mock
 import agent
 import chat
 import database as db
+import fixtures
 from test_agent import FakeClient
 
 
@@ -25,8 +26,9 @@ class ChatTests(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({"name": "Milo", "species": "Dog"}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({"name": "Milo", "species": "Dog"}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat"}, owner_id=self.owner))
         self.store = {}
 
         env = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_MODEL": ""})
@@ -51,7 +53,7 @@ class ChatTests(unittest.TestCase):
         self.assertIn("taking care of Milo", history[0]["content"])
 
     def test_send_message_adds_question_and_claude_reply(self):
-        reply = chat.send_message(self.store, self.milo, "When does Milo eat?")
+        reply = chat.send_message(self.store, self.milo, "When does Milo eat?", user_id=self.owner)
         history = chat.get_history(self.store, self.milo)
         self.assertEqual([m["role"] for m in history], ["assistant", "user", "assistant"])
         self.assertEqual(history[1]["content"], "When does Milo eat?")
@@ -59,13 +61,13 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(reply, "Milo eats dry food without chicken.")
 
     def test_question_is_sent_to_claude_once(self):
-        chat.send_message(self.store, self.milo, "When does Milo eat?")
+        chat.send_message(self.store, self.milo, "When does Milo eat?", user_id=self.owner)
         messages = self.client.requests[0]["messages"]
         self.assertEqual(messages, [{"role": "user", "content": "When does Milo eat?"}])
 
     def test_follow_up_question_includes_earlier_turn(self):
-        chat.send_message(self.store, self.milo, "What food does Milo eat?")
-        chat.send_message(self.store, self.milo, "What should I avoid giving him?")
+        chat.send_message(self.store, self.milo, "What food does Milo eat?", user_id=self.owner)
+        chat.send_message(self.store, self.milo, "What should I avoid giving him?", user_id=self.owner)
         messages = self.client.requests[1]["messages"]
         self.assertEqual([m["content"] for m in messages], [
             "What food does Milo eat?",
@@ -77,33 +79,33 @@ class ChatTests(unittest.TestCase):
         self.client.error = RuntimeError("boom")
         with mock.patch("traceback.print_exc"):
             with self.assertRaises(chat.AgentError):
-                chat.send_message(self.store, self.milo, "Hi")
+                chat.send_message(self.store, self.milo, "Hi", user_id=self.owner)
         history = chat.get_history(self.store, self.milo)
         self.assertEqual([m["role"] for m in history], ["assistant", "user"])  # question kept, no fake answer
 
     def test_cleared_chat_is_not_sent_to_claude(self):
-        chat.send_message(self.store, self.milo, "Old question")
+        chat.send_message(self.store, self.milo, "Old question", user_id=self.owner)
         chat.clear_history(self.store, self.milo["id"])
-        chat.send_message(self.store, self.milo, "New question")
+        chat.send_message(self.store, self.milo, "New question", user_id=self.owner)
         self.assertEqual(self.client.requests[1]["messages"], [{"role": "user", "content": "New question"}])
 
     def test_each_pet_uses_its_own_profile(self):
-        chat.send_message(self.store, self.milo, "Allergies?")
-        chat.send_message(self.store, self.luna, "Allergies?")
+        chat.send_message(self.store, self.milo, "Allergies?", user_id=self.owner)
+        chat.send_message(self.store, self.luna, "Allergies?", user_id=self.owner)
         self.assertIn('"Milo"', self.client.requests[0]["system"])
         self.assertIn('"Luna"', self.client.requests[1]["system"])
         self.assertNotIn("Milo", self.client.requests[1]["system"])
 
     def test_pets_have_separate_conversations(self):
-        chat.send_message(self.store, self.milo, "Question about Milo")
+        chat.send_message(self.store, self.milo, "Question about Milo", user_id=self.owner)
         luna_history = chat.get_history(self.store, self.luna)
         self.assertEqual(len(luna_history), 1)  # only Luna's welcome message
         self.assertIn("Luna", luna_history[0]["content"])
         self.assertEqual(len(chat.get_history(self.store, self.milo)), 3)
 
     def test_clear_only_affects_selected_pet(self):
-        chat.send_message(self.store, self.milo, "Milo question")
-        chat.send_message(self.store, self.luna, "Luna question")
+        chat.send_message(self.store, self.milo, "Milo question", user_id=self.owner)
+        chat.send_message(self.store, self.luna, "Luna question", user_id=self.owner)
         chat.clear_history(self.store, self.milo["id"])
         self.assertEqual(len(chat.get_history(self.store, self.milo)), 1)  # fresh welcome
         self.assertEqual(len(chat.get_history(self.store, self.luna)), 3)
@@ -113,13 +115,13 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(self.store, {})
 
     def test_reply_uses_the_given_pet_id(self):
-        chat.get_reply(self.luna["id"], "Hello", [])
+        chat.get_reply(self.luna["id"], "Hello", [], user_id=self.owner)
         self.assertIn('"Luna"', self.client.requests[0]["system"])
 
     def test_reply_for_missing_pet(self):
-        with self.assertRaises(chat.AgentError) as caught:
-            chat.get_reply(999, "Hello", [])
-        self.assertIn("couldn't find", str(caught.exception))
+        with self.assertRaises(chat.AccessEnded) as caught:
+            chat.get_reply(999, "Hello", [], user_id=self.owner)
+        self.assertIn("don't have access", str(caught.exception))
 
 
 if __name__ == "__main__":

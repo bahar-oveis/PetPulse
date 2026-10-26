@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import agent
 import database as db
+import fixtures
 import food_checker as fc
 import vision
 from test_agent import FakeClient, api_error
@@ -233,8 +234,9 @@ class LabelAgentTests(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}, owner_id=self.owner))
         self.client = FakeClient(reply="Milo should not eat this: it contains chicken meal.")
         for patcher in (
             mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_MODEL": ""}),
@@ -252,7 +254,8 @@ class LabelAgentTests(unittest.TestCase):
 
     def ask(self, pet=None, question="Can Milo eat these treats?", history=()):
         pet = pet or self.milo
-        return agent.ask_about_label(pet["id"], self.image, self.media_type, LABEL, self.check, question, history)
+        return agent.ask_about_label(pet["id"], self.image, self.media_type, LABEL, self.check, question, history,
+                                     user_id=self.owner)
 
     def test_image_text_and_rule_result_are_sent(self):
         self.assertIn("chicken meal", self.ask())
@@ -315,8 +318,9 @@ class ScannerAppTests(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}))
-        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}))
+        self.owner = fixtures.make_owner()
+        self.milo = db.get_pet(db.create_pet({**db.DEMO_PET}, owner_id=self.owner))
+        self.luna = db.get_pet(db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}, owner_id=self.owner))
         self.client = FakeClient(reply="Milo should not eat this: it contains chicken meal.")
         self.ocr = mock.Mock(return_value=vision.OcrResult(text=LABEL, confidence=94.0, word_count=30))
         for patcher in (
@@ -327,15 +331,22 @@ class ScannerAppTests(unittest.TestCase):
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30).run()
-        self.select(self.milo)
+        self.sitter = fixtures.make_sitter()
+        fixtures.grant(self.owner, self.milo["id"], self.sitter)
+        self.current = self.milo
+        self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30)
+        self.at.session_state["user_id"] = self.sitter  # signed in as the sitter
+        self.at.run()
 
     def tearDown(self):
         db.DB_PATH = self.original_path
         self.temp_dir.cleanup()
 
     def select(self, pet):
-        self.at.selectbox(key="sitter_pet_id").set_value(pet["id"]).run()
+        """The owner moves the sitter's access to another of their pets."""
+        fixtures.move_sitter(self.owner, self.current["id"], pet["id"], self.sitter)
+        self.current = pet
+        self.at.run()
 
     def upload(self, data, pet=None):
         pet = pet or self.milo

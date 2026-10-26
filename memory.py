@@ -77,14 +77,14 @@ def _require_pet(pet_id):
 
 
 def _public(row, score=None):
-    memory = {key: row[key] for key in ("id", "content", "source", "created_at")}
+    memory = {key: row[key] for key in ("id", "content", "source", "created_at", "author_id")}
     if score is not None:
         memory["score"] = round(float(score), 3)
     return memory
 
 
-def save_pet_memory(pet_id, content, source=DEFAULT_SOURCE):
-    """Save an observation for one pet and return its ID."""
+def save_pet_memory(pet_id, content, source=DEFAULT_SOURCE, author_id=None):
+    """Save an observation for one pet and return its ID. author_id is the account that wrote it."""
     content = (content or "").strip()
     if not content:
         raise PetMemoryError("Please write an observation before saving.")
@@ -97,7 +97,7 @@ def save_pet_memory(pet_id, content, source=DEFAULT_SOURCE):
     except Exception:
         traceback.print_exc()  # no pet data is printed, only the error
         embedding = None       # saved anyway; recall embeds it later or falls back to keywords
-    return db.add_memory(pet_id, content, source or DEFAULT_SOURCE, embedding)
+    return db.add_memory(pet_id, content, source or DEFAULT_SOURCE, embedding, author_id=author_id)
 
 
 def get_pet_memories(pet_id):

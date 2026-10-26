@@ -13,12 +13,14 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# SQLite databases (petpulse.db is kept in the repo on purpose)
+# SQLite databases: they now hold accounts, password hashes, and pet data, so never commit them
 *.db
 *.sqlite
 *.sqlite3
 *.db-journal
-!petpulse.db
+*.db-wal
+*.db-shm
+backups/
 
 # Streamlit secrets
 .streamlit/secrets.toml

@@ -18,6 +18,7 @@ import httpx2
 
 import agent
 import database as db
+import fixtures
 
 REAL_CREATE_CLIENT = agent._create_client
 
@@ -76,8 +77,9 @@ class AgentTestCase(unittest.TestCase):
         self.original_path = db.DB_PATH
         db.DB_PATH = Path(self.temp_dir.name) / "test.db"
         db.init_db()
-        self.milo_id = db.create_pet({**db.DEMO_PET})
-        self.luna_id = db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"})
+        self.owner = fixtures.make_owner()
+        self.milo_id = db.create_pet({**db.DEMO_PET}, owner_id=self.owner)
+        self.luna_id = db.create_pet({"name": "Luna", "species": "Cat", "allergies": "Fish"}, owner_id=self.owner)
 
         env = mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key", "ANTHROPIC_MODEL": ""})
         env.start()
@@ -157,11 +159,11 @@ class BuildMessagesTests(unittest.TestCase):
 
 class AskTests(AgentTestCase):
     def test_returns_claudes_answer(self):
-        answer = agent.ask(self.milo_id, "Can I give Milo chicken?", [])
+        answer = agent.ask(self.milo_id, "Can I give Milo chicken?", [], user_id=self.owner)
         self.assertEqual(answer, "Here is my answer.")
 
     def test_one_request_with_profile_and_memory_tool(self):
-        agent.ask(self.milo_id, "Can I give Milo chicken?", [])
+        agent.ask(self.milo_id, "Can I give Milo chicken?", [], user_id=self.owner)
         self.assertEqual(len(self.client.requests), 1)
         request = self.client.requests[0]
         self.assertIn("<pet_profile>", request["system"])
@@ -170,7 +172,7 @@ class AskTests(AgentTestCase):
         self.assertEqual(request["max_iterations"], agent.MAX_ITERATIONS)
 
     def test_request_settings(self):
-        agent.ask(self.milo_id, "Hi", [])
+        agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
         request = self.client.requests[0]
         self.assertEqual(request["model"], "claude-haiku-5-5")
         self.assertEqual(request["max_tokens"], agent.MAX_TOKENS)
@@ -179,33 +181,33 @@ class AskTests(AgentTestCase):
 
     def test_model_can_be_configured(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "claude-sonnet-5-5"}):
-            agent.ask(self.milo_id, "Hi", [])
+            agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
         self.assertEqual(self.client.requests[0]["model"], "claude-sonnet-5-5")
 
     def test_only_selected_pet_is_sent_to_claude(self):
-        agent.ask(self.milo_id, "Does Luna have allergies?", [])
+        agent.ask(self.milo_id, "Does Luna have allergies?", [], user_id=self.owner)
         system = self.client.requests[0]["system"]
         self.assertIn("Milo", system)
         self.assertNotIn("Fish", system)
         self.assertNotIn('"Luna"', system)
 
     def test_latest_profile_is_loaded_for_each_question(self):
-        agent.ask(self.milo_id, "Allergies?", [])
+        agent.ask(self.milo_id, "Allergies?", [], user_id=self.owner)
         db.update_pet(self.milo_id, {"allergies": "Chicken and beef"})
-        agent.ask(self.milo_id, "Allergies now?", [])
+        agent.ask(self.milo_id, "Allergies now?", [], user_id=self.owner)
         self.assertNotIn("Chicken and beef", self.client.requests[0]["system"])
         self.assertIn("Chicken and beef", self.client.requests[1]["system"])
 
     def test_missing_pet_does_not_call_claude(self):
         with self.assertRaises(agent.AgentError):
-            agent.ask(999, "Hi", [])
+            agent.ask(999, "Hi", [], user_id=self.owner)
         self.assertEqual(self.client.requests, [])
 
     def test_database_error_is_friendly_and_does_not_call_claude(self):
         with mock.patch.object(db, "get_pet", side_effect=RuntimeError("disk path /secret")), \
                 mock.patch("traceback.print_exc"):
             with self.assertRaises(agent.AgentError) as caught:
-                agent.ask(self.milo_id, "Hi", [])
+                agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
         self.assertNotIn("/secret", str(caught.exception))
         self.assertEqual(self.client.requests, [])
 
@@ -213,7 +215,7 @@ class AskTests(AgentTestCase):
         with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), \
                 mock.patch.object(agent, "_create_client", REAL_CREATE_CLIENT):
             with self.assertRaises(agent.AgentError) as caught:
-                agent.ask(self.milo_id, "Hi", [])
+                agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
         self.assertIn("ANTHROPIC_API_KEY", str(caught.exception))
 
     def test_api_failures_become_friendly_errors(self):
@@ -232,18 +234,18 @@ class AskTests(AgentTestCase):
                 self.client.error = error
                 with mock.patch("traceback.print_exc"):
                     with self.assertRaises(agent.AgentError) as caught:
-                        agent.ask(self.milo_id, "Hi", [])
+                        agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
                 self.assertNotIn("secret", str(caught.exception))
 
     def test_empty_answer_is_an_error(self):
         self.client.reply = "   "
         with self.assertRaises(agent.AgentError):
-            agent.ask(self.milo_id, "Hi", [])
+            agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
 
     def test_refusal_is_an_error(self):
         self.client.stop_reason = "refusal"
         with self.assertRaises(agent.AgentError):
-            agent.ask(self.milo_id, "Hi", [])
+            agent.ask(self.milo_id, "Hi", [], user_id=self.owner)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,11 @@ selected pet when it's created; Claude only chooses what to search for.
 
 ask_about_label() is the same agent with a food-label photo attached, plus the
 locally read label text and the rule-based allergy check (vision.py, food_checker.py).
+
+Every call takes the signed-in user's ID. Access is checked in the database
+(access.py) before the profile is loaded, on every memory search, and again
+before an answer is returned: if the sitter's access was revoked while Claude
+was answering, the answer is discarded.
 """
 
 import base64
@@ -25,8 +30,7 @@ from anthropic import beta_tool
 from anthropic.lib.tools import ToolError
 from dotenv import load_dotenv
 
-import database as db
-import memory
+import access
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -114,6 +118,10 @@ class AgentError(Exception):
     """A problem the sitter should see as a friendly message (never with secrets or internals)."""
 
 
+class AccessEnded(AgentError):
+    """The user has no (or no longer any) access to this pet."""
+
+
 def profile_for_agent(pet):
     """The pet's profile as readable JSON, marking empty fields as not recorded."""
     profile = {}
@@ -128,12 +136,13 @@ def build_system_prompt(pet):
     return SYSTEM_PROMPT.format(pet_name=json.dumps(pet["name"]), profile=profile_for_agent(pet))
 
 
-def make_memory_tool(pet_id):
+def make_memory_tool(pet_id, user_id):
     """
-    Build a recall_pet_memories tool locked to one pet.
+    Build a recall_pet_memories tool locked to one pet and one signed-in user.
 
-    The pet ID is captured inside the function (a closure); Claude can only
-    choose the search text, never which pet's memories are searched.
+    The IDs are captured inside the function (a closure); Claude can only
+    choose the search text, never which pet's memories are searched. Access is
+    checked again on every search.
     """
 
     @beta_tool
@@ -144,7 +153,9 @@ def make_memory_tool(pet_id):
             query: What to look for, in plain words, e.g. "scared of visitors or the doorbell".
         """
         try:
-            found = memory.recall_pet_memories(pet_id, query)
+            found = access.recall_memories(user_id, pet_id, query)
+        except access.AccessDenied:
+            raise ToolError("Access to this pet has ended.")
         except Exception:
             traceback.print_exc()
             raise ToolError("Earlier sitter observations couldn't be searched right now.")
@@ -200,18 +211,18 @@ def _create_client():
     return anthropic.Anthropic(api_key=api_key, timeout=60, max_retries=2)
 
 
-def _load_pet(pet_id):
+def _authorized_pet(user_id, pet_id, operation):
+    """The pet's current profile, if this user may use it for operation."""
     try:
-        pet = db.get_pet(pet_id)
+        return access.require_pet_access(user_id, pet_id, operation)
+    except access.AccessDenied:
+        raise AccessEnded("You don't have access to this pet.")
     except Exception:
         traceback.print_exc()
         raise AgentError("The pet profile could not be loaded right now. Please try again.")
-    if pet is None:
-        raise AgentError("Sorry, I couldn't find this pet's profile.")
-    return pet
 
 
-def _run_claude(pet_id, system, messages, bad_request_message=None):
+def _run_claude(pet_id, user_id, operation, system, messages, bad_request_message=None):
     """Send one question to Claude (with the memory tool) and return the answer text."""
     client = _create_client()
     model = os.getenv("ANTHROPIC_MODEL", "").strip() or DEFAULT_MODEL
@@ -223,7 +234,7 @@ def _run_claude(pet_id, system, messages, bad_request_message=None):
             max_iterations=MAX_ITERATIONS,
             output_config={"effort": "low"},
             system=system,
-            tools=[make_memory_tool(pet_id)],
+            tools=[make_memory_tool(pet_id, user_id)],
             messages=messages,
         )
         response = None
@@ -257,20 +268,23 @@ def _run_claude(pet_id, system, messages, bad_request_message=None):
     answer = "".join(block.text for block in response.content if block.type == "text").strip()
     if not answer:
         raise AgentError("I couldn't come up with an answer. Please try asking again.")
+    # Access may have been revoked while Claude was answering: then the answer is discarded.
+    if not access.has_pet_access(user_id, pet_id, operation):
+        raise AccessEnded("Your access to this pet has ended, so this answer was discarded.")
     return answer
 
 
-def ask(pet_id, question, history):
+def ask(pet_id, question, history, *, user_id):
     """
     Ask Claude a question about one pet and return the answer text.
 
-    pet_id must come from the app (the pet the sitter selected). The pet's
-    current profile is loaded here, for every question.
+    pet_id must come from the app, and user_id is the signed-in user; access is
+    checked here. The pet's current profile is loaded for every question.
     history is the earlier conversation, not including this question.
-    Raises AgentError with a friendly message if anything goes wrong.
+    Raises AgentError (AccessEnded for access problems) with a friendly message.
     """
-    pet = _load_pet(pet_id)
-    return _run_claude(pet_id, build_system_prompt(pet), build_messages(history, question))
+    pet = _authorized_pet(user_id, pet_id, access.CHAT)
+    return _run_claude(pet_id, user_id, access.CHAT, build_system_prompt(pet), build_messages(history, question))
 
 
 def build_label_block(label_text, check):
@@ -292,14 +306,14 @@ def build_label_block(label_text, check):
     )
 
 
-def ask_about_label(pet_id, image_bytes, media_type, label_text, check, question, history=()):
+def ask_about_label(pet_id, image_bytes, media_type, label_text, check, question, history=(), *, user_id):
     """
     Ask Claude about a photographed food label for one pet.
 
     The first user message carries the photo (an image content block) and the
     label data; history holds earlier questions and answers about this label.
     """
-    pet = _load_pet(pet_id)
+    pet = _authorized_pet(user_id, pet_id, access.VISION)
     image_block = {
         "type": "image",
         "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(image_bytes).decode("ascii")},
@@ -313,6 +327,8 @@ def ask_about_label(pet_id, image_bytes, media_type, label_text, check, question
     ]}
     return _run_claude(
         pet_id,
+        user_id,
+        access.VISION,
         build_system_prompt(pet) + LABEL_SCAN_RULES,
         messages,
         bad_request_message=(
