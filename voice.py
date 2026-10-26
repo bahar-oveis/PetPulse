@@ -17,10 +17,12 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+import wave
 from pathlib import Path
 
 WHISPER_MODEL = "base"
 LANGUAGE = "en"
+SAMPLE_RATE = 16000  # what Whisper expects
 SAY_TIMEOUT_SECONDS = 60
 
 
@@ -45,11 +47,21 @@ def transcribe_audio(audio_bytes):
     """Turn a WAV recording into text. Raises VoiceError if nothing usable was heard."""
     if not audio_bytes or len(audio_bytes) < 1000:  # a WAV header alone is ~44 bytes
         raise VoiceError("The recording is empty. Please record your question again.")
+    return _transcribe(io.BytesIO(audio_bytes))
 
+
+def transcribe_samples(samples):
+    """Turn 16 kHz mono float32 samples (used by Live Conversation) into text."""
+    if samples is None or len(samples) < SAMPLE_RATE // 10:  # less than 0.1 s
+        raise VoiceError("The recording is empty. Please say your question again.")
+    return _transcribe(samples)
+
+
+def _transcribe(audio):
     try:
         model = get_whisper_model()
         segments, _info = model.transcribe(
-            io.BytesIO(audio_bytes),
+            audio,
             language=LANGUAGE,
             vad_filter=True,  # skip silence, which also stops Whisper inventing words
         )
@@ -70,8 +82,8 @@ def speech_text(text):
     return text.strip()
 
 
-def synthesize_speech(text):
-    """Read text aloud with macOS `say` and return WAV audio bytes."""
+def synthesize_speech(text, sample_rate=22050):
+    """Read text aloud with macOS `say` and return WAV audio bytes (16-bit mono)."""
     text = speech_text(text or "")
     if not text:
         raise VoiceError("There is no answer to read aloud.")
@@ -83,7 +95,7 @@ def synthesize_speech(text):
         try:
             # The text goes in through stdin, not as an argument, so it can never be read as an option.
             subprocess.run(
-                ["say", "-o", str(output), "--file-format=WAVE", "--data-format=LEI16@22050"],
+                ["say", "-o", str(output), "--file-format=WAVE", f"--data-format=LEI16@{int(sample_rate)}"],
                 input=text,
                 text=True,
                 capture_output=True,
@@ -98,3 +110,13 @@ def synthesize_speech(text):
     if not audio:
         raise VoiceError("The spoken answer couldn't be created, but you can read it in the chat.")
     return audio
+
+
+def wav_to_pcm(wav_bytes):
+    """Return (int16 samples, sample rate) from 16-bit mono WAV bytes."""
+    import numpy as np
+
+    with wave.open(io.BytesIO(wav_bytes)) as wav:
+        if wav.getsampwidth() != 2 or wav.getnchannels() != 1:
+            raise VoiceError("The spoken answer has an unexpected audio format.")
+        return np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16), wav.getframerate()

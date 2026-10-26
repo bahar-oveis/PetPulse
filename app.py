@@ -4,6 +4,7 @@ import streamlit as st
 
 import chat
 import database as db
+import live_voice
 
 st.set_page_config(page_title="PetPulse", page_icon="🐾", layout="centered")
 
@@ -59,6 +60,12 @@ st.session_state.setdefault("chats", {})
 st.session_state.setdefault("voice", {})
 st.session_state.setdefault("voice_versions", {})
 st.session_state.setdefault("voice_notice", None)
+# Live Conversation: the running live_voice.LiveSession (one at a time), or None.
+st.session_state.setdefault("live_session", None)
+
+TEXT_MODE = "💬 Text Chat"
+VOICE_MODE = "🎙️ Voice Message"
+LIVE_MODE = "🔴 Live Conversation"
 
 
 def pet_form_fields(key_prefix, pet=None):
@@ -225,20 +232,25 @@ def show_chat(pet):
         chat.clear_voice(st.session_state.voice, pet["id"])
         reset_recorder(pet["id"])
 
-    history = chat.get_history(chats, pet)
-    # Fixed-height board: messages scroll inside it instead of making the page longer.
-    messages = st.container(height=420, border=True)
-    with messages:
-        for message in history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+    mode = st.radio("Chat mode", [TEXT_MODE, VOICE_MODE, LIVE_MODE], horizontal=True,
+                    label_visibility="collapsed", key="chat_mode")
+    # A live session only runs while its pet is selected and Live mode is open.
+    stop_live_session(keep_pet_id=pet["id"] if mode == LIVE_MODE else None)
+    if mode == LIVE_MODE:
+        show_live_conversation(pet)
+        return
 
-    spoken = st.session_state.voice.get("replies", {}).get(pet["id"])
-    if spoken and spoken["audio"]:
-        st.caption("🔊 Spoken answer to your last voice question")
-        st.audio(spoken["audio"], format="audio/wav")
-    elif spoken:
-        st.info(f"🔇 {spoken['error']}")
+    messages = show_messages(chat.get_history(chats, pet))
+
+    if mode == VOICE_MODE:
+        spoken = st.session_state.voice.get("replies", {}).get(pet["id"])
+        if spoken and spoken["audio"]:
+            st.caption("🔊 Spoken answer to your last voice question")
+            st.audio(spoken["audio"], format="audio/wav")
+        elif spoken:
+            st.info(f"🔇 {spoken['error']}")
+        show_voice_input(pet)
+        return
 
     question = st.chat_input(f"Ask about {pet['name']}'s care…", key="sitter_chat_input")
     # chat_input only returns the question on the run right after the sitter sends it,
@@ -255,7 +267,98 @@ def show_chat(pet):
                 except chat.AgentError as error:
                     st.error(str(error))
 
-    show_voice_input(pet)
+
+def show_messages(history):
+    """Fixed-height board: messages scroll inside it instead of making the page longer."""
+    messages = st.container(height=420, border=True)
+    with messages:
+        for message in history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    return messages
+
+
+def stop_live_session(keep_pet_id=None):
+    """Stop the running live session, unless it belongs to keep_pet_id."""
+    live = st.session_state.live_session
+    if live is not None and live.pet_id != keep_pet_id:
+        live.stop()
+        st.session_state.live_session = None
+
+
+def show_live_conversation(pet):
+    """Hands-free, turn-based voice chat over WebRTC (see live_voice.py)."""
+    from streamlit_webrtc import (
+        WebRtcMode,
+        create_audio_sink_track,
+        create_pcm_audio_source_track,
+        webrtc_streamer,
+    )
+
+    live = st.session_state.live_session
+    if live is None or live.state == live_voice.STOPPED:
+        live = live_voice.LiveSession(pet, st.session_state.chats)
+        st.session_state.live_session = live
+
+    st.caption(
+        f"Talk with PetPulse about **{pet['name']}** hands-free: start the conversation, ask a question, "
+        "then pause. PetPulse answers out loud and then listens again. Speech is turned into text and "
+        "back into speech on this computer; only the text is sent to Claude. Headphones work best."
+    )
+
+    # Microphone audio goes to the session; the session's spoken answers go back to the browser.
+    microphone = create_audio_sink_track(callback=live.on_audio_frame, key=f"live-mic-{pet['id']}")
+    speaker = create_pcm_audio_source_track(key=f"live-speaker-{pet['id']}", sample_rate=live_voice.SPEAKER_RATE)
+    live.speaker = speaker
+    stream = webrtc_streamer(
+        key=f"live-{pet['id']}",
+        mode=WebRtcMode.SENDRECV,
+        sink_audio_track=microphone,
+        source_audio_track=speaker.track,
+        media_stream_constraints={
+            "audio": {"echoCancellation": True, "noiseSuppression": True, "autoGainControl": True},
+            "video": False,
+        },
+        rtc_configuration={"iceServers": []},  # browser and this server connect directly (localhost)
+        audio_html_attrs={"autoPlay": True, "controls": False},
+        translations={"start": "Start Live Conversation", "stop": "End Session"},
+    )
+    if stream.state.playing:
+        live.start()
+    elif live.state != live_voice.IDLE:
+        live.stop()
+
+    show_live_status(pet)
+
+
+LIVE_STATUS = {
+    live_voice.IDLE: "⚪ **Ready** — click *Start Live Conversation*.",
+    live_voice.LISTENING: "🟢 **Listening** — ask your question, then pause.",
+    live_voice.PROCESSING: "🟡 **Processing** — understanding your question and asking PetPulse…",
+    live_voice.SPEAKING: "🔵 **Speaking** — PetPulse is answering out loud. Start talking to interrupt.",
+    live_voice.STOPPED: "⚫ **Session ended.**",
+}
+
+
+@st.fragment(run_every=1.0)
+def show_live_status(pet):
+    """Refreshes every second: state, microphone, and the shared conversation."""
+    live = st.session_state.live_session
+    if live is None:
+        return
+    state = live.state
+    if state in (live_voice.LISTENING, live_voice.PROCESSING, live_voice.SPEAKING):
+        microphone = "🎤 Microphone on" if live.receiving_audio() else "🎤 Waiting for microphone audio…"
+    else:
+        microphone = "🎤 Microphone off"
+    st.markdown(f"{LIVE_STATUS[state]} &nbsp;·&nbsp; {microphone}")
+    if live.paused and state == live_voice.LISTENING:
+        st.caption("⏸️ Answer paused — go ahead and ask. If it was just a noise, PetPulse will continue the answer.")
+    if live.heard:
+        st.caption(f"Last heard: “{live.heard}”")
+    if live.notice:
+        st.warning(live.notice)
+    show_messages(chat.get_history(st.session_state.chats, pet))
 
 
 def reset_recorder(pet_id):

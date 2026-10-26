@@ -79,6 +79,29 @@ audio player.
 - Recordings are sent from the browser to the local Streamlit server, kept in
   memory, and never saved. Only the confirmed text goes to Claude.
 
+## Live Conversation (hands-free)
+
+Choose **🔴 Live Conversation** in the Pet Sitter tab and click **Start Live
+Conversation**. Ask a question and pause for about a second: PetPulse
+transcribes it, answers out loud, and listens again. Click **End Session** to
+stop. Live, Voice Message, and Text Chat share the same conversation.
+
+- Microphone audio streams from the browser to the local Python server over
+  WebRTC ([streamlit-webrtc](https://github.com/whitphx/streamlit-webrtc)).
+- Silero voice activity detection (bundled with faster-whisper) finds where a
+  question starts and ends; Whisper transcribes it; macOS `say` speaks the
+  answer, which is streamed back to the browser.
+- You can interrupt: start talking while PetPulse is speaking and it pauses the
+  answer. A real question is answered next; a cough, noise, or PetPulse's own
+  voice coming back through the speakers lets the answer continue. Headphones
+  give the best results. Interruptions can be turned off with
+  `LiveSettings(barge_in=False)` in `live_voice.py`.
+- The microphone is ignored while PetPulse is thinking.
+- Only the transcribed text is sent to Claude. Claude itself still needs the
+  internet, so the app is not fully offline.
+- Use `http://localhost:8501`: browsers only allow the microphone on localhost
+  or HTTPS. Running on a remote server would also need STUN/TURN servers.
+
 ## Project files
 
 | File | Purpose |
@@ -91,6 +114,8 @@ audio player.
 | `test_chat.py` | Tests for the sitter chat |
 | `voice.py` | Local speech to text (faster-whisper) and text to speech (macOS `say`) |
 | `test_agent.py` | Tests for the Claude agent (no real API calls) |
+| `live_voice.py` | Live Conversation: voice activity detection and the turn-taking session |
 | `test_voice.py` | Tests for voice mode (Whisper, `say`, and Claude mocked) |
+| `test_live_voice.py` | Tests for Live Conversation (simulated microphone, Claude mocked) |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Example environment settings |

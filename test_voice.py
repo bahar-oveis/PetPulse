@@ -271,6 +271,7 @@ class VoiceAppTests(VoiceTestCase):
         self.at = AppTest.from_file(str(Path(__file__).parent / "app.py"), default_timeout=30).run()
         self.assertFalse(self.at.exception)
         self.at.selectbox(key="sitter_pet_id").set_value(self.milo["id"]).run()
+        self.at.radio(key="chat_mode").set_value("🎙️ Voice Message").run()
 
     def record(self, audio=RECORDING):
         self.at.audio_input[0].set_value(("question.wav", audio, "audio/wav")).run()
